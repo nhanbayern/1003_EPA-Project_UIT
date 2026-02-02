@@ -1,4 +1,7 @@
 .env
 .vscode
 .git
-/workspaces/1003_EPA-Project_UIT/ultility/__pycache__
+/__pycache__
+.venv
+notes.txt
+/output
