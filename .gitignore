@@ -5,3 +5,9 @@
 .venv
 notes.txt
 /output
+__pycache__/
+*.pyc
+.env
+.venv/
+.vscode/
+.ipynb_checkpoints/
