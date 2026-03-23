@@ -19,6 +19,6 @@ def compute_rank_ic(prediction):
             continue
 
         prediction.loc[df_t.index, "rank_ic"] = ic
-
+    
     return prediction
 
