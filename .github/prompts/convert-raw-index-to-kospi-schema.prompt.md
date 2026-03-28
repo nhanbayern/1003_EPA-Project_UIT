@@ -50,3 +50,9 @@ Viet cac ham Python de xu ly du lieu chi so chung khoan co cau truc raw nhu DAX_
 - So dong truoc/sau khi xu ly.
 - Min/max cua cot `time`.
 - So gia tri null moi cot sau chuan hoa.
+
+
+
+# Main prompt:
+Do not create MD
+Do not create other code for example or test
