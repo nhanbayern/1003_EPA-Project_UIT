@@ -2,9 +2,28 @@
 import numpy as np
 from scipy import stats as scipy_stats
 
+
+def rolling_std_vol(returns, window_size):
+    window_size = int(max(1, window_size))
+    arr = np.asarray(returns, dtype=float)
+    out = np.full(arr.shape[0], np.nan, dtype=float)
+
+    for t in range(window_size - 1, arr.shape[0]):
+        w = arr[t - window_size + 1:t + 1]
+        if np.all(np.isfinite(w)):
+            out[t] = np.std(w, ddof=0)
+
+    return out
+
+
 def compute_mse_qlike(realized_vol, predicted_vol):
+    realized_vol = np.asarray(realized_vol, dtype=float)
+    predicted_vol = np.asarray(predicted_vol, dtype=float)
+    if realized_vol.size == 0 or predicted_vol.size == 0:
+        return np.nan, np.nan
+
     realized_var = realized_vol**2
-    predicted_var = predicted_vol**2
+    predicted_var = np.maximum(predicted_vol**2, 1e-8)
     mse = np.mean((realized_vol - predicted_vol) ** 2)
     qlike = np.mean(np.log(predicted_var) + realized_var / predicted_var)
     return mse, qlike
@@ -29,7 +48,7 @@ def kupiec_test(violations, confidence_level=0.95):
 
     return viol_rate, lr_stat, p_value
 
-def evaluate_all(returns_eval, vol_forecast, nu, confidence_level=0.95):
+def evaluate_all(returns_eval, vol_forecast, nu, confidence_level=0.95, seq_len=60):
     realized_vol = np.abs(returns_eval)
     mse, qlike = compute_mse_qlike(realized_vol, vol_forecast)
 

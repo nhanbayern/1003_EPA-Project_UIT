@@ -40,3 +40,7 @@ def garch_forecast_fixed_params(train_data, test_data, model_name='GARCH'):
         history.append(test_data[t])
 
     return np.array(predictions)
+
+
+def rolling_garch_forecast(train_data, test_data, model_name='GARCH'):
+    return garch_forecast_fixed_params(train_data, test_data, model_name=model_name)

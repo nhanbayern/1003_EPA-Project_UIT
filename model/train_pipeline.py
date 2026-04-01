@@ -8,8 +8,10 @@ import ultility.data_loader as data_loader
 import ultility.models_garch as models_garch
 import ultility.models_transformer as models_transformer
 import ultility.models_lstm_baseline as models_lstm_baseline
+import ultility.metrics as metrics
 import ultility.var_calculator as var_calculator
 from ultility.lstmgarch import LSTMGARCH
+from ultility.transformer_garch import TransformerGARCH
 
 
 def lstm_baseline_forecast(train_data, val_data, test_data, seq_len=60, epochs=80):
@@ -76,6 +78,41 @@ def lstm_garch_forecast(train_data, test_data, seq_len=60, epochs=50):
     return np.array(preds)
 
 
+def transformer_garch_forecast(train_data, test_data, seq_len=60, epochs=50):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch.backends.cudnn.benchmark = True
+    train_seq = create_sequences(train_data, seq_len)
+    if len(train_seq) == 0:
+        raise ValueError("Not enough data for Transformer-GARCH sequences")
+    train_tensor = torch.tensor(train_seq, dtype=torch.float32)
+    pin = torch.cuda.is_available()
+    train_loader = DataLoader(train_tensor, batch_size=64, shuffle=True, pin_memory=pin)
+    model = TransformerGARCH().to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    for _ in range(epochs):
+        model.train()
+        for batch in train_loader:
+            batch = batch.to(device, non_blocking=True)
+            opt.zero_grad()
+            loss, _ = model(batch)
+            loss.backward()
+            opt.step()
+    model.eval()
+    history = list(train_data)
+    preds = []
+    with torch.no_grad():
+        for x in test_data:
+            if len(history) < seq_len:
+                history.append(x)
+                continue
+            seq = torch.tensor(history[-seq_len:], dtype=torch.float32, device=device).unsqueeze(0)
+            _, sigma2_seq = model(seq)
+            sigma_pred = torch.sqrt(sigma2_seq[:, -1]).cpu().numpy()[0]
+            preds.append(sigma_pred)
+            history.append(x)
+    return np.array(preds)
+
+
 def run_benchmark(datasets, split_df, window_size=60, seq_len=60, confidence_level=0.95):
     all_results = []
 
@@ -85,6 +122,7 @@ def run_benchmark(datasets, split_df, window_size=60, seq_len=60, confidence_lev
         "Transformer": lambda tr, val, te: models_transformer.train_transformer(np.abs(tr), np.abs(te), seq_len=seq_len, epochs=100),
         "LSTM-Baseline": lambda tr, val, te: lstm_baseline_forecast(tr, val, te, seq_len=seq_len, epochs=80),
         "LSTM-GARCH": lambda tr, val, te: lstm_garch_forecast(tr, te, seq_len=seq_len, epochs=50),
+        "Transformer-GARCH": lambda tr, val, te: transformer_garch_forecast(tr, te, seq_len=seq_len, epochs=50),
     }
 
     var_calc = var_calculator.RollingVaRCalculator(
@@ -106,7 +144,11 @@ def run_benchmark(datasets, split_df, window_size=60, seq_len=60, confidence_lev
                     returns_eval, vol_forecast, confidence_level=confidence_level
                 )
 
-                valid_mask = (~np.isnan(var_estimates)) & (~np.isnan(returns_eval))
+                valid_mask = (
+                    (~np.isnan(var_estimates))
+                    & (~np.isnan(returns_eval))
+                    & (~np.isnan(vol_forecast))
+                )
                 if not valid_mask.any():
                     continue
 
@@ -126,11 +168,7 @@ def run_benchmark(datasets, split_df, window_size=60, seq_len=60, confidence_lev
                 )
 
                 realized_vol = np.abs(returns_valid)
-                realized_var = returns_valid ** 2
-                forecast_var = vol_valid ** 2
-
-                mse = np.nanmean((realized_vol - vol_valid) ** 2)
-                qlike = np.nanmean(np.log(forecast_var) + realized_var / np.maximum(forecast_var, 1e-8))
+                mse, qlike = metrics.compute_mse_qlike(realized_vol, vol_valid)
 
                 result_row = {
                     "Dataset": name,
