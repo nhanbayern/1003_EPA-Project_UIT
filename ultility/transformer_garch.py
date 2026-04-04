@@ -5,11 +5,12 @@ import math
 
 
 class TransformerGARCH(nn.Module):
-    def __init__(self, d_model=32, nhead=4, num_layers=2, max_len=512):
+    def __init__(self, d_model=32, nhead=4, num_layers=2, max_len=512, correction_scale=0.05):
         super().__init__()
 
         self.d_model = d_model
         self.max_len = max_len
+        self.correction_scale = correction_scale
 
         self.raw_omega = nn.Parameter(torch.tensor(-5.0))
         self.raw_alpha = nn.Parameter(torch.tensor(-2.0))
@@ -59,69 +60,117 @@ class TransformerGARCH(nn.Module):
     def student_nu(self):
         return torch.clamp(F.softplus(self.raw_nu) + 2, min=4)
 
+    def _rolling_mean(self, squared_returns, end_idx, window):
+        start_idx = max(0, end_idx - window + 1)
+        window_slice = squared_returns[:, start_idx:end_idx + 1]
+        return window_slice.mean(dim=1)
+
+    def _garch_base_var(self, eps_prev, sigma2_prev, squared_returns, end_idx, omega, alpha, beta, lambda_, phi1, phi5, phi20):
+        neg = (eps_prev < 0).float()
+        leverage = lambda_ * eps_prev.pow(2) * neg
+
+        rv1 = squared_returns[:, end_idx]
+        rv5 = self._rolling_mean(squared_returns, end_idx, 5)
+        rv20 = self._rolling_mean(squared_returns, end_idx, 20)
+
+        return omega + alpha * eps_prev.pow(2) + beta * sigma2_prev + leverage + phi1 * rv1 + phi5 * rv5 + phi20 * rv20
+
+    def _build_garch_path(self, returns):
+        omega, alpha, beta, lambda_, phi1, phi5, phi20 = self.garch_params()
+
+        batch_size, sequence_length = returns.shape
+        device = returns.device
+
+        sigma2_path = torch.empty(batch_size, sequence_length, device=device, dtype=returns.dtype)
+        features = torch.empty(batch_size, sequence_length, 2, device=device, dtype=returns.dtype)
+
+        squared_returns = returns.pow(2)
+
+        sigma2_path[:, 0] = squared_returns[:, 0] + 1e-6
+        features[:, 0, 0] = 0.0
+        features[:, 0, 1] = torch.log(sigma2_path[:, 0] + 1e-8)
+
+        for t in range(1, sequence_length):
+            eps_prev = returns[:, t - 1]
+            sigma2_prev = sigma2_path[:, t - 1]
+
+            base_var = self._garch_base_var(
+                eps_prev=eps_prev,
+                sigma2_prev=sigma2_prev,
+                squared_returns=squared_returns,
+                end_idx=t - 1,
+                omega=omega,
+                alpha=alpha,
+                beta=beta,
+                lambda_=lambda_,
+                phi1=phi1,
+                phi5=phi5,
+                phi20=phi20,
+            )
+            sigma2_path[:, t] = torch.clamp(base_var, min=1e-8)
+
+            features[:, t, 0] = eps_prev / torch.sqrt(sigma2_prev + 1e-8)
+            features[:, t, 1] = torch.log(sigma2_prev + 1e-8)
+
+        return sigma2_path, features
+
+    def _transformer_correction(self, features):
+        seq_len = features.size(1)
+        if seq_len > self.max_len:
+            raise ValueError(f"Sequence length {seq_len} exceeds max_len={self.max_len}.")
+
+        x = self.input_proj(features)
+        x = x + self.pos_embedding[:, :seq_len, :]
+
+        causal_mask = torch.triu(
+            torch.ones(seq_len, seq_len, device=features.device, dtype=torch.bool),
+            diagonal=1,
+        )
+        x = self.transformer(x, mask=causal_mask)
+        return self.output_layer(x[:, -1, :]).squeeze(-1)
+
+    def forecast_next_variance(self, returns):
+        if returns.dim() == 1:
+            returns = returns.unsqueeze(0)
+
+        if returns.dim() != 2:
+            raise ValueError("returns must have shape (batch_size, sequence_length) or (sequence_length,)")
+
+        omega, alpha, beta, lambda_, phi1, phi5, phi20 = self.garch_params()
+        _, features = self._build_garch_path(returns)
+        correction = self._transformer_correction(features)
+
+        squared_returns = returns.pow(2)
+        eps_prev = returns[:, -1]
+        sigma2_prev = self._build_garch_path(returns)[0][:, -1]
+        base_var_next = self._garch_base_var(
+            eps_prev=eps_prev,
+            sigma2_prev=sigma2_prev,
+            squared_returns=squared_returns,
+            end_idx=returns.size(1) - 1,
+            omega=omega,
+            alpha=alpha,
+            beta=beta,
+            lambda_=lambda_,
+            phi1=phi1,
+            phi5=phi5,
+            phi20=phi20,
+        )
+
+        sigma2_next = base_var_next * (1.0 + self.correction_scale * torch.tanh(correction))
+        return torch.clamp(sigma2_next, min=1e-8)
+
+    def negative_log_likelihood(self, returns):
+        sigma2_next = self.forecast_next_variance(returns)
+        nu = self.student_nu()
+        eps = returns[:, -1] if returns.dim() == 2 else returns[-1]
+        eps = eps.unsqueeze(0) if eps.dim() == 0 else eps
+        term1 = 0.5 * torch.log(sigma2_next)
+        term2 = (nu + 1) / 2 * torch.log(1 + eps.pow(2) / ((nu - 2) * sigma2_next))
+        const = torch.lgamma((nu + 1) / 2) - torch.lgamma(nu / 2) - 0.5 * torch.log((nu - 2) * math.pi)
+        return (term1 + term2 - const).mean()
+
     def forward(self, returns):
         omega, alpha, beta, lambda_, phi1, phi5, phi20 = self.garch_params()
-        nu = self.student_nu()
-
-        batch_size, T = returns.shape
-
-        sigma2_list = []
-        sigma2_t = returns[:, 0] ** 2 + 1e-6
-        sigma2_list.append(sigma2_t)
-
-        squared_returns_history = [returns[:, 0] ** 2]
-        features_seq = []
-
-        for t in range(1, T):
-            eps_prev = returns[:, t - 1]
-
-            shock = eps_prev / torch.sqrt(sigma2_t + 1e-8)
-            neg = (eps_prev < 0).float()
-            leverage = lambda_ * eps_prev ** 2 * neg
-
-            RV1 = eps_prev ** 2
-
-            if len(squared_returns_history) >= 5:
-                RV5 = torch.stack(squared_returns_history[-5:], dim=1).mean(dim=1)
-            else:
-                RV5 = torch.stack(squared_returns_history, dim=1).mean(dim=1)
-
-            if len(squared_returns_history) >= 20:
-                RV20 = torch.stack(squared_returns_history[-20:], dim=1).mean(dim=1)
-            else:
-                RV20 = torch.stack(squared_returns_history, dim=1).mean(dim=1)
-
-            base_var = omega + alpha * eps_prev ** 2 + beta * sigma2_t + leverage + phi1 * RV1 + phi5 * RV5 + phi20 * RV20
-
-            log_sigma = torch.log(base_var + 1e-8)
-
-            feat = torch.stack([shock, log_sigma], dim=1)
-            features_seq.append(feat)
-
-            seq_tensor = torch.stack(features_seq, dim=1)
-
-            x = self.input_proj(seq_tensor)
-            x = x + self.pos_embedding[:, :x.size(1), :]
-
-            mask = torch.triu(torch.ones(x.size(1), x.size(1), device=x.device), diagonal=1).bool()
-            x = self.transformer(x, mask=mask)
-
-            correction = self.output_layer(x[:, -1, :]).squeeze(1)
-
-            sigma2_t = base_var * (1 + 0.05 * torch.tanh(correction))
-            sigma2_t = torch.clamp(sigma2_t, min=1e-8)
-            sigma2_list.append(sigma2_t)
-
-            squared_returns_history.append(eps_prev ** 2)
-
-        sigma2 = torch.stack(sigma2_list, dim=1)
-
-        eps = returns / torch.sqrt(sigma2)
-
-        term1 = 0.5 * torch.log(sigma2)
-        term2 = (nu + 1) / 2 * torch.log(1 + eps ** 2 / ((nu - 2) * sigma2))
-        const = torch.lgamma((nu + 1) / 2) - torch.lgamma(nu / 2) - 0.5 * torch.log((nu - 2) * math.pi)
-
-        nll = term1 + term2 - const
-
-        return nll.mean(), sigma2
+        del omega, alpha, beta, lambda_, phi1, phi5, phi20
+        return self.forecast_next_variance(returns)
