@@ -78,21 +78,25 @@ class TransformerGARCH(nn.Module):
     def _build_garch_path(self, returns):
         omega, alpha, beta, lambda_, phi1, phi5, phi20 = self.garch_params()
 
-        batch_size, sequence_length = returns.shape
-        device = returns.device
-
-        sigma2_path = torch.empty(batch_size, sequence_length, device=device, dtype=returns.dtype)
-        features = torch.empty(batch_size, sequence_length, 2, device=device, dtype=returns.dtype)
+        _, sequence_length = returns.shape
 
         squared_returns = returns.pow(2)
 
-        sigma2_path[:, 0] = squared_returns[:, 0] + 1e-6
-        features[:, 0, 0] = 0.0
-        features[:, 0, 1] = torch.log(sigma2_path[:, 0] + 1e-8)
+        sigma2_t = squared_returns[:, 0] + 1e-6
+        sigma2_path = [sigma2_t]
+        features = [
+            torch.stack(
+                [
+                    torch.zeros_like(sigma2_t),
+                    torch.log(sigma2_t + 1e-8),
+                ],
+                dim=1,
+            )
+        ]
 
         for t in range(1, sequence_length):
             eps_prev = returns[:, t - 1]
-            sigma2_prev = sigma2_path[:, t - 1]
+            sigma2_prev = sigma2_path[-1]
 
             base_var = self._garch_base_var(
                 eps_prev=eps_prev,
@@ -107,11 +111,20 @@ class TransformerGARCH(nn.Module):
                 phi5=phi5,
                 phi20=phi20,
             )
-            sigma2_path[:, t] = torch.clamp(base_var, min=1e-8)
+            sigma2_t = torch.clamp(base_var, min=1e-8)
+            sigma2_path.append(sigma2_t)
+            features.append(
+                torch.stack(
+                    [
+                        eps_prev / torch.sqrt(sigma2_prev + 1e-8),
+                        torch.log(sigma2_prev + 1e-8),
+                    ],
+                    dim=1,
+                )
+            )
 
-            features[:, t, 0] = eps_prev / torch.sqrt(sigma2_prev + 1e-8)
-            features[:, t, 1] = torch.log(sigma2_prev + 1e-8)
-
+        sigma2_path = torch.stack(sigma2_path, dim=1)
+        features = torch.stack(features, dim=1)
         return sigma2_path, features
 
     def _transformer_correction(self, features):
@@ -137,12 +150,12 @@ class TransformerGARCH(nn.Module):
             raise ValueError("returns must have shape (batch_size, sequence_length) or (sequence_length,)")
 
         omega, alpha, beta, lambda_, phi1, phi5, phi20 = self.garch_params()
-        _, features = self._build_garch_path(returns)
+        sigma2_path, features = self._build_garch_path(returns)
         correction = self._transformer_correction(features)
 
         squared_returns = returns.pow(2)
         eps_prev = returns[:, -1]
-        sigma2_prev = self._build_garch_path(returns)[0][:, -1]
+        sigma2_prev = sigma2_path[:, -1]
         base_var_next = self._garch_base_var(
             eps_prev=eps_prev,
             sigma2_prev=sigma2_prev,

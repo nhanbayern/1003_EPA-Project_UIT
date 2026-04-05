@@ -9,30 +9,54 @@ from .metrics import compute_mse_qlike, kupiec_test
 def realized_vol(returns, window):
     return np.sqrt(pd.Series(returns).rolling(window+1).apply(lambda x: np.mean(x**2), raw=True).values)
 
+def _align_prediction_length(y_pred, target_len, seq_len):
+    y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
+    if y_pred.size == target_len:
+        return y_pred
+    if y_pred.size == max(target_len - seq_len, 0):
+        prefix = np.full(seq_len, np.nan, dtype=float)
+        return np.concatenate([prefix, y_pred])
+    if y_pred.size < target_len:
+        suffix = np.full(target_len - y_pred.size, np.nan, dtype=float)
+        return np.concatenate([y_pred, suffix])
+    return y_pred[:target_len]
+
 def map_predictions(datasets, split_df, predictions_dict, seq_len=60):
     preds_list = []
     for ds, series in datasets.items():
         tr, va, te = int(split_df.loc[ds, 'Train']), int(split_df.loc[ds, 'Val']), int(split_df.loc[ds, 'Test'])
         test_start = tr + va
-        test_data = series.iloc[test_start:test_start+te].values if hasattr(series, 'iloc') else series[test_start:test_start+te]
-        test_dates = series.index[test_start+seq_len:test_start+te] if hasattr(series, 'index') else np.arange(test_start+seq_len, test_start+te)
+        if hasattr(series, 'iloc'):
+            test_slice = series.iloc[test_start:test_start+te]
+            test_data = np.asarray(test_slice.values, dtype=float)
+            test_dates = pd.to_datetime(test_slice.index, errors='coerce')
+        else:
+            test_data = np.asarray(series[test_start:test_start+te], dtype=float)
+            test_dates = np.arange(test_start, test_start + len(test_data))
+
+        y_real_full = realized_vol(test_data, seq_len)
         
         for model, preds in predictions_dict.items():
             if ds not in preds:
                 continue
-            y_pred = np.abs(preds[ds][:len(test_data)-seq_len])
-            y_real = realized_vol(test_data, seq_len)[seq_len:]
-            
-            for i, d in enumerate(test_dates):
-                if i < len(y_pred):
-                    preds_list.append({
-                        'Dataset': ds,
-                        'Model': model,
-                        'Date': d,
-                        'return': test_data[seq_len+i],
-                        'predicted_vol': y_pred[i],
-                        'vol_realized': y_real[i]
-                    })
+
+            y_pred_full = _align_prediction_length(np.abs(preds[ds]), len(test_data), seq_len)
+            n = min(len(y_pred_full), len(y_real_full), len(test_data), len(test_dates))
+
+            for i in range(n):
+                y_hat = y_pred_full[i]
+                y_real = y_real_full[i]
+                if not np.isfinite(y_hat) or not np.isfinite(y_real):
+                    continue
+
+                preds_list.append({
+                    'Dataset': ds,
+                    'Model': model,
+                    'Date': test_dates[i],
+                    'return': test_data[i],
+                    'predicted_vol': y_hat,
+                    'vol_realized': y_real
+                })
     
     return pd.DataFrame(preds_list)
 
@@ -103,19 +127,23 @@ def save_and_plot(datasets, split_df, predictions_dict, nu_dict, seq_len=60, out
     
     for idx, ds in enumerate(datasets_list):
         ax = axes[idx]
-        df_ds = preds_df[preds_df['Dataset'] == ds]
+        df_ds = preds_df[preds_df['Dataset'] == ds].copy()
+        df_ds['Date'] = pd.to_datetime(df_ds['Date'], errors='coerce')
+        df_ds = df_ds.dropna(subset=['Date']).sort_values('Date')
         
         for model in models_list:
-            df_model = df_ds[df_ds['Model'] == model]
+            df_model = df_ds[df_ds['Model'] == model].sort_values('Date')
             if not df_model.empty:
-                ax.plot(df_model.index, df_model['predicted_vol'], marker='o', label=f'{model} (pred)', alpha=0.7)
+                ax.plot(df_model['Date'], df_model['predicted_vol'], marker='o', label=f'{model} (pred)', alpha=0.7)
         
-        ax.plot(df_ds.index, df_ds['vol_realized'], marker='s', label='Realized', linewidth=2, alpha=0.8)
+        realized_line = df_ds[['Date', 'vol_realized']].drop_duplicates(subset=['Date']).sort_values('Date')
+        ax.plot(realized_line['Date'], realized_line['vol_realized'], marker='s', label='Realized', linewidth=2, alpha=0.8)
         ax.set_title(f'{ds}', fontsize=12, fontweight='bold')
         ax.set_xlabel('Time')
         ax.set_ylabel('Volatility')
         ax.legend()
         ax.grid(True, alpha=0.3)
+        ax.tick_params(axis='x', rotation=30)
     
     for idx in range(len(datasets_list), len(axes)):
         axes[idx].axis('off')
