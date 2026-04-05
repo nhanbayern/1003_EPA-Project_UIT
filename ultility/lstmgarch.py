@@ -87,7 +87,7 @@ class LSTMGARCH(nn.Module):
             c_hat = torch.tanh(self.Wc * shock + self.Uc * log_sigma + self.bc)
             c_t = f_t * c_t + i_t * c_hat
             correction = torch.tanh((c_t * self.v).sum(dim=1))
-            sigma2_t = base_var * (1 + 0.05 * torch.tanh(correction))
+            sigma2_t = base_var * (1 + self.w * correction)
             sigma2_t = torch.clamp(sigma2_t, min=1e-8)
             sigma2_list.append(sigma2_t)
             squared_returns_history.append(eps_prev ** 2)

@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import tqdm
 import torch
+import time
 from torch.utils.data import DataLoader
 
 import ultility.data_loader as data_loader
@@ -14,8 +15,15 @@ from ultility.lstmgarch import LSTMGARCH
 from ultility.transformer_garch import TransformerGARCH
 
 
+def _require_cuda_device():
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for this pipeline. No GPU detected.")
+    torch.backends.cudnn.benchmark = True
+    return torch.device("cuda")
+
+
 def lstm_baseline_forecast(train_data, val_data, test_data, seq_len=60, epochs=80):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = str(_require_cuda_device())
     model, scaler, _, _ = models_lstm_baseline.train_lstm_baseline(
         train_data,
         val_data,
@@ -44,14 +52,12 @@ def create_sequences(data, seq_len):
 
 
 def lstm_garch_forecast(train_data, test_data, seq_len=60, epochs=50):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    torch.backends.cudnn.benchmark = True
+    device = _require_cuda_device()
     train_seq = create_sequences(train_data, seq_len)
     if len(train_seq) == 0:
         raise ValueError("Not enough data for LSTM-GARCH sequences")
     train_tensor = torch.tensor(train_seq, dtype=torch.float32)
-    pin = torch.cuda.is_available()
-    train_loader = DataLoader(train_tensor, batch_size=64, shuffle=True, pin_memory=pin)
+    train_loader = DataLoader(train_tensor, batch_size=64, shuffle=True, pin_memory=True)
     model = LSTMGARCH().to(device)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     for _ in range(epochs):
@@ -79,14 +85,12 @@ def lstm_garch_forecast(train_data, test_data, seq_len=60, epochs=50):
 
 
 def transformer_garch_forecast(train_data, test_data, seq_len=60, epochs=50):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    torch.backends.cudnn.benchmark = True
+    device = _require_cuda_device()
     train_seq = create_sequences(train_data, seq_len)
     if len(train_seq) == 0:
         raise ValueError("Not enough data for Transformer-GARCH sequences")
     train_tensor = torch.tensor(train_seq, dtype=torch.float32)
-    pin = torch.cuda.is_available()
-    train_loader = DataLoader(train_tensor, batch_size=64, shuffle=True, pin_memory=pin)
+    train_loader = DataLoader(train_tensor, batch_size=64, shuffle=True, pin_memory=True)
     model = TransformerGARCH().to(device)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     for _ in range(epochs):
@@ -114,6 +118,7 @@ def transformer_garch_forecast(train_data, test_data, seq_len=60, epochs=50):
 
 
 def run_benchmark(datasets, split_df, window_size=60, seq_len=60, confidence_level=0.95):
+    _require_cuda_device()
     all_results = []
 
     models_to_run = {
@@ -136,7 +141,13 @@ def run_benchmark(datasets, split_df, window_size=60, seq_len=60, confidence_lev
             train_data, val_data, test_data = data_loader.get_splits_for_dataset(series, split_df, name, seq_len)
 
             for model_name, model_func in models_to_run.items():
+                model_t0 = None
+                if model_name in ("Transformer", "Transformer-GARCH"):
+                    tqdm.tqdm.write(f"[{name}] Start {model_name}")
+                    model_t0 = time.perf_counter()
                 vol_forecast = model_func(train_data, val_data, test_data)
+                if model_t0 is not None:
+                    tqdm.tqdm.write(f"[{name}] Done {model_name} ({time.perf_counter() - model_t0:.2f}s)")
 
                 returns_eval = test_data[-len(vol_forecast):]
 
