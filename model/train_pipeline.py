@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import tqdm
 import torch
+import time
 from torch.utils.data import DataLoader
 
 import ultility.data_loader as data_loader
@@ -140,7 +141,13 @@ def run_benchmark(datasets, split_df, window_size=60, seq_len=60, confidence_lev
             train_data, val_data, test_data = data_loader.get_splits_for_dataset(series, split_df, name, seq_len)
 
             for model_name, model_func in models_to_run.items():
+                model_t0 = None
+                if model_name in ("Transformer", "Transformer-GARCH"):
+                    tqdm.tqdm.write(f"[{name}] Start {model_name}")
+                    model_t0 = time.perf_counter()
                 vol_forecast = model_func(train_data, val_data, test_data)
+                if model_t0 is not None:
+                    tqdm.tqdm.write(f"[{name}] Done {model_name} ({time.perf_counter() - model_t0:.2f}s)")
 
                 returns_eval = test_data[-len(vol_forecast):]
 
