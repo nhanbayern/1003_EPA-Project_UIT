@@ -173,4 +173,4 @@ class TransformerGARCH(nn.Module):
     def forward(self, returns):
         omega, alpha, beta, lambda_, phi1, phi5, phi20 = self.garch_params()
         del omega, alpha, beta, lambda_, phi1, phi5, phi20
-        return self.forecast_next_variance(returns)
+        return self.forecast_next_variance(returns) 
