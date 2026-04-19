@@ -26,10 +26,10 @@ No local data folder is created in this package.
 
 - Data preprocessing includes:
   - log return
-  - MA(5) on squared returns
+  - rolling 60-day volatility with ddof=0
   - scale by 100
   - split 8:1:1 in chronological order
-  - sequence length default seq_len=126
+  - sequence length default seq_len=60
 - Statistical baselines include rolling refit forecast:
   - GARCH(1,1)
   - GJR-GARCH
@@ -42,8 +42,8 @@ No local data folder is created in this package.
   - 5 seeds: [42, 123, 202, 303, 404]
   - horizons: [1, 3, 5, 10, 21]
 - Benchmark outputs:
-  - Main metrics CSV (MAE, MSE by dataset, seed, horizon, model)
-  - Mean-over-seeds prediction CSV: <output_stem>_predictions_mean_seed.csv
+  - Main metrics CSV (MAE, MSE, QLIKE, Violation_Rate, Kupiec_LR, Kupiec_p, LR_Ind)
+  - Prediction CSV: predictions.csv
     with columns: time, dataset, model, horizon, True_Volatility,
     Pred_Volatility, time_train
 
@@ -51,8 +51,8 @@ No local data folder is created in this package.
 
 Run one DL training job:
 
-python -m AAAI24_GARCH_NN_Reproduction.experiments.train_dl_models --dataset VN30_INDEX.csv --seq-len 126 --epochs 120
+python -m AAAI24_GARCH_NN_Reproduction.experiments.train_dl_models --dataset VN30_INDEX.csv --seq-len 60 --epochs 120
 
 Run benchmark:
 
-python -m AAAI24_GARCH_NN_Reproduction.experiments.run_benchmark --seq-len 126 --epochs 60
+python -m AAAI24_GARCH_NN_Reproduction.experiments.run_benchmark --seq-len 60 --epochs 60

@@ -11,6 +11,7 @@ import torch
 
 from AAAI24_GARCH_NN_Reproduction.core.custom_metrics import compute_metrics
 from AAAI24_GARCH_NN_Reproduction.core.data_processor import (
+    DEFAULT_VOL_WINDOW,
     DEFAULT_SEQ_LEN,
     create_sliding_windows,
     get_default_dataset_dir,
@@ -38,6 +39,19 @@ SEEDS = [42, 123, 202, 303, 404]
 HORIZONS = [1, 3, 5, 10, 21]
 STAT_MODELS = ["GARCH", "GJR-GARCH", "FI-GARCH"]
 HYBRID_MODEL_NAME = "GARCH-LSTM-Hybrid"
+ROLLING_VOL_WINDOW = DEFAULT_VOL_WINDOW
+
+NU_TEST_BY_DATASET = {
+    "VN30INDEX": 2.385,
+    "VNINDEX": 2.510,
+    "DAX40": 4.298,
+    "EURONEXT100": 4.072,
+    "IBEX35": 5.963,
+    "KOSPIINDEX": 5.169,
+    "SMI": 4.725,
+    "SNP500": 3.423,
+    "NIKKEI225": 4.596,
+}
 
 
 def _log(message, enabled=True):
@@ -45,6 +59,18 @@ def _log(message, enabled=True):
         return
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] {message}", flush=True)
+
+
+def _normalize_dataset_key(name):
+    return "".join(ch for ch in str(name).upper() if ch.isalnum())
+
+
+def _get_dataset_nu_test(dataset_name):
+    key = _normalize_dataset_key(dataset_name)
+    if key not in NU_TEST_BY_DATASET:
+        valid = ", ".join(sorted(NU_TEST_BY_DATASET.keys()))
+        raise KeyError(f"No nu_test mapping for dataset={dataset_name}. Valid keys: {valid}")
+    return float(NU_TEST_BY_DATASET[key])
 
 
 def resolve_device(device=None):
@@ -107,24 +133,86 @@ def _build_val_windows(train_r, train_v, val_r, val_v, seq_len):
         return create_sliding_windows(context_r, context_v, seq_len=seq_len, horizon=1)
 
 
-def _compute_horizon_targets(test_returns, horizon):
-    test_returns = np.asarray(test_returns, dtype=float)
-    n_eval = len(test_returns) - horizon
-    if n_eval <= 0:
-        return np.asarray([]), np.asarray([])
+def _build_target_matrix_point_in_time(
+    test_returns,
+    max_horizon,
+    rolling_window=ROLLING_VOL_WINDOW,
+    history_returns=None,
+):
+    """
+    Build point-in-time volatility targets for horizons 1..max_horizon.
 
-    future_returns = np.asarray(
-        [np.nansum(test_returns[i + 1 : i + 1 + horizon]) for i in range(n_eval)],
+    Target definition for anchor i and horizon h:
+        target(i, h) = rolling_std_rolling_window(test_returns.shift(1))[i + h]
+
+    This matches the realized-vol formula over past returns only:
+        sigma_t = sqrt((1 / w) * sum_{k=1..w} (r_{t-k} - r_bar)^2)
+    implemented with population std (ddof=0).
+    """
+    test_returns = np.asarray(test_returns, dtype=float)
+    if max_horizon < 1:
+        raise ValueError("max_horizon must be >= 1")
+
+    n_test = test_returns.size
+    n_anchors = n_test - max_horizon
+    if n_anchors <= 0:
+        return np.empty((0, max_horizon), dtype=float), 0
+
+    if history_returns is not None and len(history_returns) > 0:
+        history_returns = np.asarray(history_returns, dtype=float)
+        full_returns = np.concatenate([history_returns, test_returns])
+        rolling_full = (
+            pd.Series(full_returns)
+            .shift(1)
+            .rolling(window=int(rolling_window))
+            .std(ddof=0)
+            .to_numpy(dtype=float)
+        )
+        rolling_vol = rolling_full[-n_test:]
+    else:
+        rolling_vol = (
+            pd.Series(test_returns)
+            .shift(1)
+            .rolling(window=int(rolling_window))
+            .std(ddof=0)
+            .to_numpy(dtype=float)
+        )
+
+    target_matrix = np.asarray(
+        [rolling_vol[i + 1 : i + max_horizon + 1] for i in range(n_anchors)],
         dtype=float,
     )
-    realized_vol_h = np.asarray(
-        [
-            np.sqrt(np.nansum(np.square(test_returns[i + 1 : i + 1 + horizon])))
-            for i in range(n_eval)
-        ],
-        dtype=float,
-    )
-    return future_returns, realized_vol_h
+
+    if np.isnan(target_matrix).any():
+        nan_count = int(np.isnan(target_matrix).sum())
+        raise ValueError(
+            "Target matrix contains NaN values "
+            f"(count={nan_count}). Ensure rolling context is available."
+        )
+
+    return target_matrix, n_anchors
+
+
+def _build_pred_matrix_point_in_time(pred_var_1d, max_horizon, n_anchors):
+    """
+    Build point-in-time volatility forecasts for horizons 1..max_horizon.
+
+    Forecast definition for anchor i and horizon h:
+        pred(i, h) = sqrt(pred_var[i + h])
+    """
+    pred_var_1d = np.maximum(np.asarray(pred_var_1d, dtype=float), 1e-8)
+    if max_horizon < 1:
+        raise ValueError("max_horizon must be >= 1")
+    if n_anchors <= 0:
+        return np.empty((0, max_horizon), dtype=float)
+
+    required_len = n_anchors + max_horizon
+    if pred_var_1d.size < required_len:
+        return np.empty((0, max_horizon), dtype=float)
+
+    anchor_idx = np.arange(n_anchors, dtype=int)[:, None]
+    horizon_offsets = np.arange(1, max_horizon + 1, dtype=int)[None, :]
+    return np.sqrt(pred_var_1d[anchor_idx + horizon_offsets])
 
 
 def _train_non_stat_models(
@@ -319,6 +407,9 @@ def run_benchmark(
     device=None,
     num_workers=None,
     log_progress=True,
+    split_mode="ratio",
+    date_start=None,
+    date_end=None,
 ):
     if dataset_dir is None:
         dataset_dir = get_default_dataset_dir()
@@ -350,7 +441,23 @@ def run_benchmark(
             enabled=log_progress,
         )
         close = load_close_series(dataset_csv)
-        train_split, val_split, test_split = prepare_aaai24_data(close)
+        train_split, val_split, test_split = prepare_aaai24_data(
+            close,
+            split_mode=split_mode,
+            dataset_name=dataset_csv.stem,
+            date_start=date_start,
+            date_end=date_end,
+            verbose=log_progress,
+        )
+        
+        if log_progress:
+            from AAAI24_GARCH_NN_Reproduction.core.data_processor import print_split_report
+            print_split_report(
+                train_split, val_split, test_split,
+                seq_len=seq_len,
+                split_mode=split_mode,
+                date_range=(date_start, date_end) if (date_start or date_end) else None
+            )
 
         train_r, train_v = train_split
         val_r, val_v = val_split
@@ -361,6 +468,22 @@ def run_benchmark(
         test_r_np = test_r.to_numpy(dtype=float)
         test_v_np = test_v.to_numpy(dtype=float)
         test_time_index = test_r.index
+        nu_test = _get_dataset_nu_test(dataset_csv.stem)
+
+        max_horizon = max(HORIZONS)
+        history_returns_np = np.concatenate([train_r_np, val_r.to_numpy(dtype=float)])
+        target_matrix, n_anchors = _build_target_matrix_point_in_time(
+            test_returns=test_r_np,
+            max_horizon=max_horizon,
+            rolling_window=ROLLING_VOL_WINDOW,
+            history_returns=history_returns_np,
+        )
+        if n_anchors <= 0:
+            _log(
+                f"[{dataset_csv.stem}] Skipped: not enough test samples for max horizon={max_horizon}",
+                enabled=log_progress,
+            )
+            continue
 
         for seed in SEEDS:
             seed_start = time.perf_counter()
@@ -405,23 +528,30 @@ def run_benchmark(
                 time_train_by_model[stat_model] = stat_fit_time
 
             rows_before = len(rows)
-            for horizon in HORIZONS:
-                _, realized_vol_h = _compute_horizon_targets(test_r_np, horizon)
-                if realized_vol_h.size == 0:
+            for model_name, pred_var_1d in preds_var.items():
+                pred_matrix = _build_pred_matrix_point_in_time(
+                    pred_var_1d,
+                    max_horizon=max_horizon,
+                    n_anchors=n_anchors,
+                )
+                if pred_matrix.size == 0:
                     continue
 
-                for model_name, pred_var_1d in preds_var.items():
-                    pred_std_1d = np.sqrt(np.maximum(pred_var_1d, 1e-8))
+                for horizon in HORIZONS:
+                    h_idx = horizon - 1
+                    pred_vol_h = pred_matrix[:, h_idx]
+                    true_vol_h = target_matrix[:, h_idx]
 
-                    n_eval = min(pred_std_1d.size, realized_vol_h.size)
-                    if n_eval <= 0:
-                        continue
-
-                    pred_vol_h = pred_std_1d[:n_eval] * np.sqrt(horizon)
-                    true_vol_h = realized_vol_h[:n_eval]
+                    n_eval = n_anchors
                     target_times = test_time_index[horizon : horizon + n_eval]
+                    returns_eval_h = test_r_np[horizon : horizon + n_eval]
 
-                    metric_values = compute_metrics(true_vol_h, pred_vol_h)
+                    metric_values = compute_metrics(
+                        true_vol_h,
+                        pred_vol_h,
+                        returns_eval=returns_eval_h,
+                        nu=nu_test,
+                    )
                     rows.append(
                         {
                             "Dataset": dataset_csv.stem,
@@ -430,6 +560,11 @@ def run_benchmark(
                             "Model": model_name,
                             "MAE": metric_values["MAE"],
                             "MSE": metric_values["MSE"],
+                            "QLIKE": metric_values["QLIKE"],
+                            "Violation_Rate": metric_values["Violation_Rate"],
+                            "Kupiec_LR": metric_values["Kupiec_LR"],
+                            "Kupiec_p": metric_values["Kupiec_p"],
+                            "LR_Ind": metric_values["LR_Ind"],
                             "N_eval": n_eval,
                             "Seq_len": seq_len,
                         }
@@ -474,14 +609,12 @@ def run_benchmark(
     detailed_df = pd.DataFrame(detailed_rows)
 
     if output_csv is None:
-        output_csv = Path(__file__).resolve().parent / "results" / "benchmark_results.csv"
+        output_csv = Path(__file__).resolve().parent / "results" / "model_results.csv"
     output_csv = Path(output_csv)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
 
     results_df.to_csv(output_csv, index=False)
-    mean_seed_predictions_csv = output_csv.with_name(
-        output_csv.stem + "_predictions_mean_seed.csv"
-    )
+    mean_seed_predictions_csv = output_csv.with_name("predictions.csv")
 
     if detailed_df.empty:
         mean_seed_predictions_df = pd.DataFrame(
@@ -529,6 +662,10 @@ def main():
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--output-csv", type=str, default=None)
     parser.add_argument("--quiet", action="store_true", help="Disable progress logging")
+    parser.add_argument("--split-mode", type=str, default="ratio", choices=["ratio", "fixed_counts"],
+                        help="Split mode: 'ratio' (8:1:1) or 'fixed_counts' (predefined table)")
+    parser.add_argument("--date-start", type=str, default=None, help="Start date for filtering (e.g., 2010-01-01)")
+    parser.add_argument("--date-end", type=str, default=None, help="End date for filtering (e.g., 2025-12-31)")
     args = parser.parse_args()
 
     results_df = run_benchmark(
@@ -540,13 +677,18 @@ def main():
         device=args.device,
         num_workers=args.num_workers,
         log_progress=not args.quiet,
+        split_mode=args.split_mode,
+        date_start=args.date_start,
+        date_end=args.date_end,
     )
 
     if results_df.empty:
         print("No benchmark rows were produced.")
     else:
         summary = (
-            results_df.groupby(["Model", "Horizon"], as_index=False)[["MAE", "MSE"]]
+            results_df.groupby(["Model", "Horizon"], as_index=False)[
+                ["MAE", "MSE", "QLIKE", "Violation_Rate", "Kupiec_LR", "Kupiec_p", "LR_Ind"]
+            ]
             .mean()
             .sort_values(["Model", "Horizon"])
         )

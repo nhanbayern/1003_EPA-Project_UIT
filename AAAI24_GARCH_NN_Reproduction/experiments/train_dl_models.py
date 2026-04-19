@@ -57,12 +57,27 @@ def train_dl_models_for_dataset(
     device=None,
     num_workers=None,
     output_dir=None,
+    split_mode="ratio",
+    date_start=None,
+    date_end=None,
 ):
     dataset_csv = Path(dataset_csv)
     close = load_close_series(dataset_csv)
 
-    train_split, val_split, test_split = prepare_aaai24_data(close)
-    print_split_report(train_split, val_split, test_split, seq_len=seq_len)
+    train_split, val_split, test_split = prepare_aaai24_data(
+        close,
+        split_mode=split_mode,
+        dataset_name=dataset_csv.stem,
+        date_start=date_start,
+        date_end=date_end,
+        verbose=True,
+    )
+    print_split_report(
+        train_split, val_split, test_split,
+        seq_len=seq_len,
+        split_mode=split_mode,
+        date_range=(date_start, date_end) if (date_start or date_end) else None
+    )
 
     train_r, train_v = train_split
     val_r, val_v = val_split
@@ -136,6 +151,10 @@ def main():
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--split-mode", type=str, default="ratio", choices=["ratio", "fixed_counts"],
+                        help="Split mode: 'ratio' (8:1:1) or 'fixed_counts' (predefined table)")
+    parser.add_argument("--date-start", type=str, default=None, help="Start date for filtering (e.g., 2010-01-01)")
+    parser.add_argument("--date-end", type=str, default=None, help="End date for filtering (e.g., 2025-12-31)")
     args = parser.parse_args()
 
     dataset_arg = Path(args.dataset)
@@ -150,6 +169,9 @@ def main():
         device=args.device,
         num_workers=args.num_workers,
         output_dir=args.output_dir,
+        split_mode=args.split_mode,
+        date_start=args.date_start,
+        date_end=args.date_end,
     )
 
     print(result_df.to_string(index=False))
