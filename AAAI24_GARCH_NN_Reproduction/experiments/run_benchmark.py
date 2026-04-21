@@ -41,6 +41,28 @@ STAT_MODELS = ["GARCH", "GJR-GARCH", "FI-GARCH"]
 HYBRID_MODEL_NAME = "GARCH-LSTM-Hybrid"
 ROLLING_VOL_WINDOW = DEFAULT_VOL_WINDOW
 
+# Multi-horizon forecasting mode: "rolling" or "one_shot"
+# Will be set from notebook or CLI
+MULTI_HORIZON_MODE = "one_shot"
+
+# ==================== HYPERPARAMETER TUNING CONFIGURATION ====================
+# Tier 1 (High Priority - tune first):
+#   - LEARNING_RATE: primary optimization rate
+#   - EARLY_STOPPING_PATIENCE: prevent overfitting
+#   - LR_PATIENCE: learning rate scheduler frequency
+# Tier 2 (Medium Priority - tune after Tier 1 is stable):
+#   - LR_FACTOR: learning rate decay multiplier
+#   - MIN_LR: learning rate floor
+# Strategy: Start with these values, then grid search around them
+HYPERPARAMETER_CONFIG = {
+    "learning_rate": 1e-2,              # [Tier 1] Optimizer step size. Try: 1e-3, 5e-3, 1e-2, 5e-2
+    "lr_factor": 0.5,                  # [Tier 2] LR decay multiplier when val_loss plateaus. Try: 0.3, 0.5, 0.7
+    "lr_patience": 8,                  # [Tier 1] Epochs before LR decay. Try: 3, 5, 8, 10
+    "early_stopping_patience": 15,     # [Tier 1] Epochs before early stopping. Try: 10, 15, 20, 30
+    "min_lr": 1e-5,                    # [Tier 2] Learning rate floor. Try: 1e-7, 1e-6, 1e-5
+}
+# ==================================================================================
+
 NU_TEST_BY_DATASET = {
     "VN30INDEX": 2.385,
     "VNINDEX": 2.510,
@@ -124,13 +146,13 @@ def _discover_dataset_files(dataset_dir):
     return valid_files
 
 
-def _build_val_windows(train_r, train_v, val_r, val_v, seq_len):
+def _build_val_windows(train_r, train_v, val_r, val_v, seq_len, multi_horizon=False):
     try:
-        return create_sliding_windows(val_r, val_v, seq_len=seq_len, horizon=1)
+        return create_sliding_windows(val_r, val_v, seq_len=seq_len, horizon=1, multi_horizon=multi_horizon)
     except ValueError:
         context_r = pd.concat([train_r.iloc[-seq_len:], val_r], axis=0)
         context_v = pd.concat([train_v.iloc[-seq_len:], val_v], axis=0)
-        return create_sliding_windows(context_r, context_v, seq_len=seq_len, horizon=1)
+        return create_sliding_windows(context_r, context_v, seq_len=seq_len, horizon=1, multi_horizon=multi_horizon)
 
 
 def _build_target_matrix_point_in_time(
@@ -193,26 +215,59 @@ def _build_target_matrix_point_in_time(
     return target_matrix, n_anchors
 
 
-def _build_pred_matrix_point_in_time(pred_var_1d, max_horizon, n_anchors):
+def _build_pred_matrix_point_in_time(pred_var_1d, max_horizon, n_anchors, horizons_idx=None):
     """
     Build point-in-time volatility forecasts for horizons 1..max_horizon.
 
+    Args:
+        pred_var_1d: 
+            - rolling mode: 1D array of single-step predictions
+            - one-shot mode: 1D array of tuples, each tuple has 5 values for 5 horizons
+        max_horizon: max horizon (21)
+        n_anchors: number of anchors
+        horizons_idx: indices of selected horizons [1, 3, 5, 10, 21] (for extracting from full 21)
+    
     Forecast definition for anchor i and horizon h:
-        pred(i, h) = sqrt(pred_var[i + h])
+        rolling: pred(i, h) = sqrt(pred_var[i + h])
+        one-shot: pred(i, h_idx) = pred_var[i][h_idx]  (already has all horizons)
     """
-    pred_var_1d = np.maximum(np.asarray(pred_var_1d, dtype=float), 1e-8)
-    if max_horizon < 1:
-        raise ValueError("max_horizon must be >= 1")
-    if n_anchors <= 0:
-        return np.empty((0, max_horizon), dtype=float)
+    # Check if one-shot mode (predictions are tuples)
+    is_one_shot = (
+        len(pred_var_1d) > 0 
+        and isinstance(pred_var_1d[0], tuple) 
+        and horizons_idx is not None
+    )
+    
+    if is_one_shot:
+        # One-shot multi-horizon: each prediction already has all 5 horizons
+        # pred_var_1d[i] is a tuple of (v1, v3, v5, v10, v21)
+        # horizons_idx are the indices to extract from tuple (typically [0,1,2,3,4] for all 5)
+        if n_anchors <= 0:
+            return np.empty((0, len(horizons_idx)), dtype=float)
+        
+        # Build matrix from tuple predictions
+        matrix = []
+        for i in range(min(n_anchors, len(pred_var_1d))):
+            pred_tuple = pred_var_1d[i]
+            row = [np.sqrt(max(float(pred_tuple[h_idx]), 1e-8)) for h_idx in horizons_idx]
+            matrix.append(row)
+        
+        return np.asarray(matrix, dtype=float) if matrix else np.empty((0, len(horizons_idx)), dtype=float)
+    else:
+        # Rolling mode: build matrix from 1D predictions using indexing
+        pred_var_1d = np.maximum(np.asarray(pred_var_1d, dtype=float), 1e-8)
+        if max_horizon < 1:
+            raise ValueError("max_horizon must be >= 1")
+        if n_anchors <= 0:
+            return np.empty((0, max_horizon), dtype=float)
 
-    required_len = n_anchors + max_horizon
-    if pred_var_1d.size < required_len:
-        return np.empty((0, max_horizon), dtype=float)
+        required_len = n_anchors + max_horizon
+        if pred_var_1d.size < required_len:
+            return np.empty((0, max_horizon), dtype=float)
 
-    anchor_idx = np.arange(n_anchors, dtype=int)[:, None]
-    horizon_offsets = np.arange(1, max_horizon + 1, dtype=int)[None, :]
-    return np.sqrt(pred_var_1d[anchor_idx + horizon_offsets])
+        anchor_idx = np.arange(n_anchors, dtype=int)[:, None]
+        horizon_offsets = np.arange(1, max_horizon + 1, dtype=int)[None, :]
+        return np.sqrt(pred_var_1d[anchor_idx + horizon_offsets])
 
 
 def _train_non_stat_models(
@@ -228,9 +283,19 @@ def _train_non_stat_models(
     log_progress=False,
     dataset_name="",
     seed=None,
+    multi_horizon_mode="rolling",
 ):
-    train_windows = create_sliding_windows(train_r, train_v, seq_len=seq_len, horizon=1)
-    val_windows = _build_val_windows(train_r, train_v, val_r, val_v, seq_len=seq_len)
+    # Determine if we're using one-shot multi-horizon
+    is_one_shot = (multi_horizon_mode == "one_shot")
+    num_horizons_out = 5 if is_one_shot else 1
+    
+    train_windows = create_sliding_windows(
+        train_r, train_v, seq_len=seq_len, horizon=1, multi_horizon=is_one_shot
+    )
+    val_windows = _build_val_windows(
+        train_r, train_v, val_r, val_v, seq_len=seq_len, 
+        multi_horizon=is_one_shot
+    )
     train_loader, val_loader = build_dataloaders(
         train_windows,
         val_windows,
@@ -247,18 +312,20 @@ def _train_non_stat_models(
             enabled=log_progress,
         )
         train_start = time.perf_counter()
-        model = build_dl_model(model_name=model_name, seq_len=seq_len)
+        model = build_dl_model(
+            model_name=model_name, seq_len=seq_len, num_horizons_out=num_horizons_out
+        )
         model, history = train_dl_model(
             model=model,
             train_loader=train_loader,
             val_loader=val_loader,
             device=device,
             epochs=epochs,
-            learning_rate=1e-2,
-            lr_factor=0.5,
-            lr_patience=5,
-            early_stopping_patience=20,
-            min_lr=1e-6,
+            learning_rate=HYPERPARAMETER_CONFIG["learning_rate"],
+            lr_factor=HYPERPARAMETER_CONFIG["lr_factor"],
+            lr_patience=HYPERPARAMETER_CONFIG["lr_patience"],
+            early_stopping_patience=HYPERPARAMETER_CONFIG["early_stopping_patience"],
+            min_lr=HYPERPARAMETER_CONFIG["min_lr"],
         )
         duration = time.perf_counter() - train_start
         best_val_loss = float(np.min(history["val_loss"])) if history["val_loss"] else np.nan
@@ -274,39 +341,48 @@ def _train_non_stat_models(
         trained_dl_models[model_name] = model
         train_time_by_model[model_name] = duration
 
-    _log(
-        f"[{dataset_name}][seed={seed}] Training {HYBRID_MODEL_NAME}...",
-        enabled=log_progress,
-    )
-    hybrid_start = time.perf_counter()
-    hybrid = GARCHLSTMHybrid(hidden_size=16)
-    hybrid, hybrid_history = train_garch_lstm_hybrid(
-        model=hybrid,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        device=device,
-        epochs=epochs,
-        learning_rate=1e-2,
-        lr_factor=0.5,
-        lr_patience=5,
-        early_stopping_patience=20,
-        min_lr=1e-6,
-    )
-    hybrid_duration = time.perf_counter() - hybrid_start
-    hybrid_best_val = (
-        float(np.min(hybrid_history["val_loss"])) if hybrid_history["val_loss"] else np.nan
-    )
-    _log(
-        (
-            f"[{dataset_name}][seed={seed}] Done {HYBRID_MODEL_NAME} "
-            f"| epochs={len(hybrid_history['train_loss'])} "
-            f"| best_val_loss={hybrid_best_val:.6f} "
-            f"| time={hybrid_duration:.1f}s"
-        ),
-        enabled=log_progress,
-    )
+    # For one-shot multi-horizon, skip GARCH-LSTM-Hybrid (needs architectural changes)
+    if is_one_shot:
+        _log(
+            f"[{dataset_name}][seed={seed}] Skipping {HYBRID_MODEL_NAME} (one-shot mode)",
+            enabled=log_progress,
+        )
+        hybrid = None
+    else:
+        _log(
+            f"[{dataset_name}][seed={seed}] Training {HYBRID_MODEL_NAME}...",
+            enabled=log_progress,
+        )
+        hybrid_start = time.perf_counter()
+        hybrid = GARCHLSTMHybrid(hidden_size=16)
+        hybrid, hybrid_history = train_garch_lstm_hybrid(
+            model=hybrid,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            device=device,
+            epochs=epochs,
+            learning_rate=HYPERPARAMETER_CONFIG["learning_rate"],
+            lr_factor=HYPERPARAMETER_CONFIG["lr_factor"],
+            lr_patience=HYPERPARAMETER_CONFIG["lr_patience"],
+            early_stopping_patience=HYPERPARAMETER_CONFIG["early_stopping_patience"],
+            min_lr=HYPERPARAMETER_CONFIG["min_lr"],
+        )
+        hybrid_duration = time.perf_counter() - hybrid_start
+        hybrid_best_val = (
+            float(np.min(hybrid_history["val_loss"])) if hybrid_history["val_loss"] else np.nan
+        )
+        _log(
+            (
+                f"[{dataset_name}][seed={seed}] Done {HYBRID_MODEL_NAME} "
+                f"| epochs={len(hybrid_history['train_loss'])} "
+                f"| best_val_loss={hybrid_best_val:.6f} "
+                f"| time={hybrid_duration:.1f}s"
+            ),
+            enabled=log_progress,
+        )
 
-    train_time_by_model[HYBRID_MODEL_NAME] = hybrid_duration
+        train_time_by_model[HYBRID_MODEL_NAME] = hybrid_duration
+    
     return trained_dl_models, hybrid, train_time_by_model
 
 
@@ -372,28 +448,30 @@ def _collect_one_step_predictions(
             enabled=log_progress,
         )
 
-    _log(
-        f"[{dataset_name}][seed={seed}] Forecasting with {HYBRID_MODEL_NAME}...",
-        enabled=log_progress,
-    )
-    hybrid_start_t = time.perf_counter()
-    preds_var[HYBRID_MODEL_NAME] = rolling_hybrid_forecast_variance(
-        model=hybrid,
-        train_returns=train_r,
-        train_variance=train_v,
-        test_returns=test_r,
-        test_variance=test_v,
-        seq_len=seq_len,
-        device=device,
-    )
-    hybrid_duration = time.perf_counter() - hybrid_start_t
-    _log(
-        (
-            f"[{dataset_name}][seed={seed}] Done {HYBRID_MODEL_NAME} forecast "
-            f"| n_pred={len(preds_var[HYBRID_MODEL_NAME])} | time={hybrid_duration:.1f}s"
-        ),
-        enabled=log_progress,
-    )
+    # For one-shot mode, hybrid will be None
+    if hybrid is not None:
+        _log(
+            f"[{dataset_name}][seed={seed}] Forecasting with {HYBRID_MODEL_NAME}...",
+            enabled=log_progress,
+        )
+        hybrid_start_t = time.perf_counter()
+        preds_var[HYBRID_MODEL_NAME] = rolling_hybrid_forecast_variance(
+            model=hybrid,
+            train_returns=train_r,
+            train_variance=train_v,
+            test_returns=test_r,
+            test_variance=test_v,
+            seq_len=seq_len,
+            device=device,
+        )
+        hybrid_duration = time.perf_counter() - hybrid_start_t
+        _log(
+            (
+                f"[{dataset_name}][seed={seed}] Done {HYBRID_MODEL_NAME} forecast "
+                f"| n_pred={len(preds_var[HYBRID_MODEL_NAME])} | time={hybrid_duration:.1f}s"
+            ),
+            enabled=log_progress,
+        )
 
     return preds_var, stat_fit_time_by_model
 
@@ -410,6 +488,7 @@ def run_benchmark(
     split_mode="ratio",
     date_start=None,
     date_end=None,
+    num_seeds=5,  # Number of seeds to use (default 5, set to 1 for smoke tests)
 ):
     if dataset_dir is None:
         dataset_dir = get_default_dataset_dir()
@@ -426,7 +505,7 @@ def run_benchmark(
     _log(
         (
             f"Benchmark started | device={runtime_device} | datasets={len(dataset_files)} "
-            f"| seeds={len(SEEDS)} | horizons={HORIZONS}"
+            f"| seeds={num_seeds} | horizons={HORIZONS}"
         ),
         enabled=log_progress,
     )
@@ -447,17 +526,7 @@ def run_benchmark(
             dataset_name=dataset_csv.stem,
             date_start=date_start,
             date_end=date_end,
-            verbose=log_progress,
         )
-        
-        if log_progress:
-            from AAAI24_GARCH_NN_Reproduction.core.data_processor import print_split_report
-            print_split_report(
-                train_split, val_split, test_split,
-                seq_len=seq_len,
-                split_mode=split_mode,
-                date_range=(date_start, date_end) if (date_start or date_end) else None
-            )
 
         train_r, train_v = train_split
         val_r, val_v = val_split
@@ -485,7 +554,7 @@ def run_benchmark(
             )
             continue
 
-        for seed in SEEDS:
+        for seed in SEEDS[:num_seeds]:
             seed_start = time.perf_counter()
             set_global_seed(seed)
             _log(
@@ -506,6 +575,7 @@ def run_benchmark(
                 log_progress=log_progress,
                 dataset_name=dataset_csv.stem,
                 seed=seed,
+                multi_horizon_mode=MULTI_HORIZON_MODE,
             )
 
             preds_var, stat_fit_time_by_model = _collect_one_step_predictions(
@@ -529,10 +599,13 @@ def run_benchmark(
 
             rows_before = len(rows)
             for model_name, pred_var_1d in preds_var.items():
+                # For one-shot mode, pass horizons_idx to extract from tuple predictions
+                horizons_idx = [0, 1, 2, 3, 4] if MULTI_HORIZON_MODE == "one_shot" else None
                 pred_matrix = _build_pred_matrix_point_in_time(
                     pred_var_1d,
                     max_horizon=max_horizon,
                     n_anchors=n_anchors,
+                    horizons_idx=horizons_idx,
                 )
                 if pred_matrix.size == 0:
                     continue
@@ -570,7 +643,6 @@ def run_benchmark(
                         }
                     )
 
-                    train_time = float(time_train_by_model.get(model_name, np.nan))
                     for i in range(n_eval):
                         detailed_rows.append(
                             {
@@ -578,10 +650,9 @@ def run_benchmark(
                                 "dataset": dataset_csv.stem,
                                 "model": model_name,
                                 "horizon": horizon,
-                                "seed": seed,
                                 "True_Volatility": float(true_vol_h[i]),
                                 "Pred_Volatility": float(pred_vol_h[i]),
-                                "time_train": train_time,
+                                "return_1_day": float(returns_eval_h[i]),
                             }
                         )
 
@@ -613,7 +684,6 @@ def run_benchmark(
     output_csv = Path(output_csv)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
 
-    results_df.to_csv(output_csv, index=False)
     mean_seed_predictions_csv = output_csv.with_name("predictions.csv")
 
     if detailed_df.empty:
@@ -625,21 +695,23 @@ def run_benchmark(
                 "horizon",
                 "True_Volatility",
                 "Pred_Volatility",
-                "time_train",
+                "return_1_day",
             ]
         )
     else:
         mean_seed_predictions_df = (
-            detailed_df.groupby(["time", "dataset", "model", "horizon"], as_index=False)[
-                ["True_Volatility", "Pred_Volatility", "time_train"]
-            ]
-            .mean()
+            detailed_df.groupby(["time", "dataset", "model", "horizon"], as_index=False, sort=False)
+            .agg({
+                "True_Volatility": "mean",
+                "Pred_Volatility": "mean",
+                "return_1_day": "first"
+            })
             .sort_values(["dataset", "model", "horizon", "time"])
         )
 
     mean_seed_predictions_df.to_csv(mean_seed_predictions_csv, index=False)
     _log(
-        f"Benchmark finished | total_rows={len(results_df)} | saved={output_csv}",
+        f"Benchmark finished | total_rows={len(results_df)}",
         enabled=log_progress,
     )
     _log(

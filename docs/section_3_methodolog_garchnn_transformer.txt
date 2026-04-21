@@ -1,0 +1,66 @@
+3. Methodology
+
+3.1 Overview of Approach
+We formulate volatility forecasting and risk validation as a single evaluation pipeline rather than two disconnected tasks. The core contribution is a unified protocol that links conditional volatility prediction to distributional risk quantification and finally to VaR backtesting. This design directly addresses the evaluation mismatch commonly observed in the literature: low point-forecast error does not necessarily imply well-calibrated tail risk.
+
+Our pipeline is executed in the following sequence:
+1. Construct return and volatility-proxy series from raw equity index prices.
+2. Build chronological train/validation/test segments and rolling evaluation anchors.
+3. Estimate one-step-ahead conditional variance with each candidate model.
+4. Align one-step predictions into multi-horizon point-in-time forecasts (h = 1, 3, 5, 10, 21).
+5. Map volatility forecasts into a predictive return distribution and compute VaR.
+6. Backtest VaR exceedances and aggregate results across datasets, horizons, and random seeds.
+
+The same pipeline is applied to all model families to ensure comparability: econometric baselines (GARCH, GJR-GARCH, with FI-GARCH as an extended baseline), hybrid architectures, and deep-learning Transformer variants (Autoformer, Informer, Reformer, Transformer).
+
+3.2 Data and Data Pipeline
+The dataset consists of daily equity index close prices from multiple markets. We transform prices into log returns and define the volatility proxy as a rolling standard deviation over a fixed window (60 trading days, population standard deviation). This volatility proxy is used as the supervised target for conditional volatility forecasting.
+
+Preprocessing follows a deterministic sequence:
+1. Parse timestamps, sort chronologically, and remove invalid or missing observations.
+2. Optionally filter by a date interval for controlled subsample experiments.
+3. Compute log returns and rolling volatility proxy.
+4. Rescale returns and volatility by a constant factor (x100) for numerical stability.
+
+Data splitting is chronological to avoid look-ahead bias. We use either an 8:1:1 split (train/validation/test) or fixed-count splits for cross-market consistency. Evaluation uses rolling-origin logic on the test segment: forecasts are generated sequentially over time, each anchor only using information available up to that date, and then aligned to multiple horizons.
+
+3.3 Evaluation Protocol
+We evaluate each model along two complementary dimensions.
+
+Forecasting accuracy metrics:
+1. MSE, to penalize large forecast errors in volatility magnitude.
+2. MAE, to provide scale-robust absolute error.
+3. QLIKE, a volatility-specific loss sensitive to variance miscalibration.
+
+Risk-oriented VaR backtesting metrics:
+1. Violation rate, the empirical frequency of VaR exceedances.
+2. Kupiec LR statistic, testing unconditional coverage against nominal confidence.
+3. Kupiec p-value, inferential significance for the coverage test.
+4. LR_ind (Christoffersen independence statistic), testing temporal clustering of violations.
+
+Both dimensions are necessary. Forecast metrics assess point accuracy of conditional volatility, while VaR metrics assess whether those forecasts produce statistically valid tail-risk decisions. A model can achieve strong MSE/MAE yet fail coverage or independence in VaR backtests; conversely, acceptable coverage with poor point accuracy may still be operationally inefficient. Therefore, model ranking is based on joint performance across forecast and risk criteria.
+
+All models are benchmarked under the same datasets, horizons, and random-seed protocol to guarantee fair baseline comparison.
+
+3.4 Model Design
+We include three model categories to span distinct statistical paradigms.
+
+GARCH family:
+Classical conditional heteroskedastic models (GARCH and GJR-GARCH, with FI-GARCH extension) provide strong econometric baselines, interpretable volatility dynamics, and explicit heavy-tail likelihood formulations.
+
+Hybrid models:
+A GARCH-LSTM hybrid combines parametric volatility structure with nonlinear sequence learning. This class is included to test whether structured econometric priors and recurrent representation learning are complementary.
+
+Transformer-based models:
+Autoformer, Informer, Reformer, and vanilla Transformer are adapted for dual-stream financial sequences (returns and volatility context). They represent high-capacity deep-learning baselines for capturing long-range dependencies and nonlinear temporal patterns.
+
+Model outputs differ in nature. Some models are naturally distribution-aware through their innovation assumptions (for example, Student-t innovations in econometric specifications), while others primarily produce point conditional variance/volatility estimates. To ensure a common risk-evaluation interface, point outputs are embedded into a parametric return distribution before VaR computation.
+
+3.5 Training and Implementation Details
+The implementation is in Python, using PyTorch for deep-learning and hybrid models, and arch/statsmodels-compatible econometric tooling for GARCH-family estimation. Training and evaluation are fully automated in a reproducible benchmark script.
+
+For deep models, training uses mini-batch optimization on chronological windows, Adam optimizer, adaptive learning-rate scheduling, and early stopping based on validation loss. Hyperparameters (for example sequence length, training epochs, and optimization schedule) are selected via validation performance under a fixed protocol and then applied consistently across datasets.
+
+Rolling-window retraining is handled according to model class. Econometric baselines are re-estimated in a rolling/expanding manner at each evaluation step, reflecting how these models are used in practice. Neural and hybrid models are retrained per evaluation run (dataset-seed configuration), then rolled forward sequentially on the test period under the same information set constraints. This preserves operational realism while keeping computational cost tractable.
+
+Overall, the methodology is designed so that the primary contribution is not a single architecture, but a coherent and rigorous evaluation framework that closes the gap between volatility forecasting quality and actionable risk-management validation.

@@ -87,8 +87,9 @@ class _DualStreamBase(nn.Module):
 
 
 class DualStreamTransformer(_DualStreamBase):
-    def __init__(self, seq_len=126, d_model=64, n_heads=4, num_layers=2, dropout=0.1):
+    def __init__(self, seq_len=126, d_model=64, n_heads=4, num_layers=2, dropout=0.1, num_horizons_out=1):
         super().__init__(seq_len=seq_len)
+        self.num_horizons_out = num_horizons_out
         self.input_proj = nn.Linear(2, d_model)
         self.pos_embedding = nn.Parameter(torch.zeros(1, seq_len, d_model))
 
@@ -99,7 +100,7 @@ class DualStreamTransformer(_DualStreamBase):
             batch_first=True,
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.head = nn.Linear(d_model, 1)
+        self.head = nn.Linear(d_model, num_horizons_out)
 
     def forward(self, encoder_returns, decoder_volatility):
         x = self._stack_inputs(encoder_returns, decoder_volatility)
@@ -110,13 +111,17 @@ class DualStreamTransformer(_DualStreamBase):
         causal_mask = _build_causal_mask(seq_len, z.device)
         z = self.encoder(z, mask=causal_mask)
 
-        pred_var = F.softplus(self.head(z[:, -1, :])).squeeze(-1) + 1e-6
+        pred_var = F.softplus(self.head(z[:, -1, :])) + 1e-6
+        # If single output, squeeze for backward compatibility
+        if self.num_horizons_out == 1:
+            pred_var = pred_var.squeeze(-1)
         return pred_var
 
 
 class DualStreamAutoformer(_DualStreamBase):
-    def __init__(self, seq_len=126, d_model=64, n_heads=4, num_layers=2, dropout=0.1):
+    def __init__(self, seq_len=126, d_model=64, n_heads=4, num_layers=2, dropout=0.1, num_horizons_out=1):
         super().__init__(seq_len=seq_len)
+        self.num_horizons_out = num_horizons_out
         self.input_proj = nn.Linear(2, d_model)
         self.pos_embedding = nn.Parameter(torch.zeros(1, seq_len, d_model))
         self.ma_window = 5
@@ -128,7 +133,7 @@ class DualStreamAutoformer(_DualStreamBase):
             batch_first=True,
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.head = nn.Linear(d_model, 1)
+        self.head = nn.Linear(d_model, num_horizons_out)
 
     def _decompose(self, z):
         trend = F.avg_pool1d(
@@ -151,13 +156,16 @@ class DualStreamAutoformer(_DualStreamBase):
         season = self.encoder(season, mask=causal_mask)
         fused = season[:, -1, :] + trend[:, -1, :]
 
-        pred_var = F.softplus(self.head(fused)).squeeze(-1) + 1e-6
+        pred_var = F.softplus(self.head(fused)) + 1e-6
+        if self.num_horizons_out == 1:
+            pred_var = pred_var.squeeze(-1)
         return pred_var
 
 
 class DualStreamInformer(_DualStreamBase):
-    def __init__(self, seq_len=126, d_model=64, n_heads=4, num_layers=2, dropout=0.1):
+    def __init__(self, seq_len=126, d_model=64, n_heads=4, num_layers=2, dropout=0.1, num_horizons_out=1):
         super().__init__(seq_len=seq_len)
+        self.num_horizons_out = num_horizons_out
         self.input_proj = nn.Linear(2, d_model)
         self.pos_embedding = nn.Parameter(torch.zeros(1, seq_len, d_model))
         self.distill = nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1)
@@ -169,7 +177,7 @@ class DualStreamInformer(_DualStreamBase):
             batch_first=True,
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.head = nn.Linear(d_model, 1)
+        self.head = nn.Linear(d_model, num_horizons_out)
 
     def forward(self, encoder_returns, decoder_volatility):
         x = self._stack_inputs(encoder_returns, decoder_volatility)
@@ -185,13 +193,16 @@ class DualStreamInformer(_DualStreamBase):
         causal_mask = _build_causal_mask(reduced_len, z.device)
         z = self.encoder(z, mask=causal_mask)
 
-        pred_var = F.softplus(self.head(z[:, -1, :])).squeeze(-1) + 1e-6
+        pred_var = F.softplus(self.head(z[:, -1, :])) + 1e-6
+        if self.num_horizons_out == 1:
+            pred_var = pred_var.squeeze(-1)
         return pred_var
 
 
 class DualStreamReformer(_DualStreamBase):
-    def __init__(self, seq_len=126, d_model=64, num_layers=2, dropout=0.1, chunk_size=8):
+    def __init__(self, seq_len=126, d_model=64, num_layers=2, dropout=0.1, chunk_size=8, num_horizons_out=1):
         super().__init__(seq_len=seq_len)
+        self.num_horizons_out = num_horizons_out
         self.input_proj = nn.Linear(2, d_model)
         self.pos_embedding = nn.Parameter(torch.zeros(1, seq_len, d_model))
         self.chunk_size = max(1, int(chunk_size))
@@ -205,7 +216,7 @@ class DualStreamReformer(_DualStreamBase):
             bidirectional=True,
         )
         self.score_proj = nn.Linear(d_model, 1)
-        self.head = nn.Linear(d_model, 1)
+        self.head = nn.Linear(d_model, num_horizons_out)
 
     def _chunk_pool(self, z):
         if self.chunk_size == 1:
@@ -233,21 +244,23 @@ class DualStreamReformer(_DualStreamBase):
         attn_weights = torch.softmax(scores, dim=1)
         context = torch.sum(z * attn_weights.unsqueeze(-1), dim=1)
 
-        pred_var = F.softplus(self.head(context)).squeeze(-1) + 1e-6
+        pred_var = F.softplus(self.head(context)) + 1e-6
+        if self.num_horizons_out == 1:
+            pred_var = pred_var.squeeze(-1)
         return pred_var
 
 
-def build_dl_model(model_name, seq_len=126):
+def build_dl_model(model_name, seq_len=126, num_horizons_out=1):
     if model_name not in SUPPORTED_DL_MODELS:
         raise ValueError(f"Unsupported model_name={model_name}")
 
     if model_name == "Autoformer":
-        return DualStreamAutoformer(seq_len=seq_len)
+        return DualStreamAutoformer(seq_len=seq_len, num_horizons_out=num_horizons_out)
     if model_name == "Informer":
-        return DualStreamInformer(seq_len=seq_len)
+        return DualStreamInformer(seq_len=seq_len, num_horizons_out=num_horizons_out)
     if model_name == "Reformer":
-        return DualStreamReformer(seq_len=seq_len)
-    return DualStreamTransformer(seq_len=seq_len)
+        return DualStreamReformer(seq_len=seq_len, num_horizons_out=num_horizons_out)
+    return DualStreamTransformer(seq_len=seq_len, num_horizons_out=num_horizons_out)
 
 
 def train_dl_model(
@@ -395,10 +408,18 @@ def rolling_forecast_variance(
             else:
                 pred_var_t = model(enc_r, dec_v)
 
-            pred_var = float(pred_var_t.cpu().item())
-            preds.append(max(pred_var, 1e-6))
+            # Handle both single-horizon (shape: torch.Size([1])) and multi-horizon (shape: torch.Size([1, 5]))
+            if pred_var_t.ndim == 2:
+                # One-shot multi-horizon: shape (1, num_horizons)
+                # Return shape (num_horizons,) as a tuple/list for each time step
+                pred_values = pred_var_t.cpu().squeeze(0).numpy()
+                preds.append(tuple(max(float(p), 1e-6) for p in pred_values))
+            else:
+                # Single horizon: shape (1,)
+                pred_var = float(pred_var_t.cpu().item())
+                preds.append(max(pred_var, 1e-6))
 
             history_r.append(float(r_next))
             history_v.append(float(v_next))
 
-    return np.asarray(preds, dtype=float)
+    return np.asarray(preds, dtype=object) if preds and isinstance(preds[0], tuple) else np.asarray(preds, dtype=float)

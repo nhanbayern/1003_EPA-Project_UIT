@@ -13,7 +13,6 @@ from AAAI24_GARCH_NN_Reproduction.core.data_processor import (
     get_default_dataset_dir,
     load_close_series,
     prepare_aaai24_data,
-    print_split_report,
 )
 from AAAI24_GARCH_NN_Reproduction.models.dl_baselines import (
     SUPPORTED_DL_MODELS,
@@ -70,13 +69,6 @@ def train_dl_models_for_dataset(
         dataset_name=dataset_csv.stem,
         date_start=date_start,
         date_end=date_end,
-        verbose=True,
-    )
-    print_split_report(
-        train_split, val_split, test_split,
-        seq_len=seq_len,
-        split_mode=split_mode,
-        date_range=(date_start, date_end) if (date_start or date_end) else None
     )
 
     train_r, train_v = train_split
