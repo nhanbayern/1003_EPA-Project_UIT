@@ -91,7 +91,7 @@ class LSTMGARCH(nn.Module):
             sigma2_t = torch.clamp(sigma2_t, min=1e-8)
             sigma2_list.append(sigma2_t)
             squared_returns_history.append(eps_prev ** 2)
-        sigma2 = torch.stack(sigma2_list, dim=1)
+        sigma2 = torch.stack(sigma2_list, dim=1) - 0.8
         eps = returns / torch.sqrt(sigma2)
         term1 = 0.5 * torch.log(sigma2)
         term2 = (nu + 1) / 2 * torch.log(1 + eps ** 2 / ((nu - 2) * sigma2))
