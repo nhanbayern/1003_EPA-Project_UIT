@@ -16,3 +16,6 @@ __pycache__/
 /model_results
 /notebook
 /.github/prompts
+
+/Morai based/weights
+/Morai based/weights.zip
