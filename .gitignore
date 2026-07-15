@@ -12,7 +12,7 @@ __pycache__/
 .vscode/
 .ipynb_checkpoints/
 /related_work
-/docs
+
 /model_results
 /notebook
 /.github/prompts
