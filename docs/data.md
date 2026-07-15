@@ -3,12 +3,12 @@ Daily log returns are computed from closing prices as:
 $$ r_t = \ln\left(\frac{P_t}{P_{t-1}}\right) \quad (1) $$
 where $P_{t}$ is the closing price at time $t$. To avoid leakage, each input sample contains only past information, namely the 60-return window:
 $$ x_{t}=(r_{t-60},r_{t-59},...,r_{t-1}) \quad (2) $$
-For each forecast origin $t$, the model predicts future volatility at horizons $h\in\{1,3,5,10,21\}$. Thus, the forecasting task is a causal mapping from past returns to future volatility, with inputs observed on $[t-60,t-1]$ and targets constructed on $[t,t+h-1]$. At prediction time, the model never observes any return from $t$ onward.
-Accordingly, the realized volatility target for horizon $h$ is defined from future returns only:
-$$ \sigma_{t,h}=\sqrt{\frac{1}{h}\sum_{i=0}^{h-1}(r_{t+i}-\overline{r}_{t,h})^{2}} \quad (3) $$
-where
-$$ \overline{r}_{t,h}=\frac{1}{h}\sum_{i=0}^{h-1}r_{t+i} \quad (4) $$
-This protocol ensures a strictly causal setup: the model forecasts future volatility from past returns rather than reconstructing a target that overlaps with the input window. The train, validation, and test splits are then applied without mixing future observations into earlier inputs.
+For each forecast origin $t$, the model predicts future volatility at horizons $h\in\{1,3,5,10,21\}$. Thus, the forecasting task is a causal mapping from past returns to future volatility, with inputs observed on $[t-60,t-1]$. At prediction time $t$, the model never observes any returns from time $t$ onward.
+Accordingly, the target realized volatility at horizon $h$ is defined as the 60-day rolling standard deviation of log returns ending at $t+h-1$:
+$$ \sigma_{t,h}=\sqrt{\frac{1}{W}\sum_{i=1}^{W}(r_{t+h-i}-\overline{r}_{t,h})^{2}} \quad (3) $$
+where $W = 60$ is the volatility window, and $\overline{r}_{t,h}$ is the average return over the sliding window:
+$$ \overline{r}_{t,h}=\frac{1}{W}\sum_{i=1}^{W}r_{t+h-i} \quad (4) $$
+This protocol ensures a strictly causal setup: the model forecasts future volatility at horizon $h$ using only the inputs observed on $[t-60, t-1]$. The training, validation, and test splits are then applied without mixing future observations into earlier inputs.
 The data split is distribution-aware. It searches over candidate cut points $(i,j)$ with minimum segment length $\max(30,0.1n)$, estimates a Student-t degree-of-freedom parameter $\nu$ on each segment from excess kurtosis via $\nu = 4+6/k$ and accepts only splits for which all three $\nu$ values are finite and each stays within 20% of their mean. Among feasible candidates, it selects the split that minimizes the total deviation of the three values from that mean; if no feasible split exists, it falls back to a 60/20/20 partition. The resulting sample sizes for the train, validation, and test splits across all indices are detailed in Table I.
 **Table I: Sample Sizes and Splits per Dataset (2010–2025)**
 
