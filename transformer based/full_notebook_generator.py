@@ -1,8 +1,10 @@
-{
+import json
+
+notebook = {
  "cells": [
   {
    "cell_type": "code",
-   "execution_count": null,
+   "execution_count": None,
    "metadata": {},
    "outputs": [],
    "source": [
@@ -16,7 +18,7 @@
   },
   {
    "cell_type": "code",
-   "execution_count": null,
+   "execution_count": None,
    "metadata": {},
    "outputs": [],
    "source": [
@@ -33,7 +35,7 @@
   },
   {
    "cell_type": "code",
-   "execution_count": null,
+   "execution_count": None,
    "metadata": {},
    "outputs": [],
    "source": [
@@ -62,7 +64,7 @@
   },
   {
    "cell_type": "code",
-   "execution_count": null,
+   "execution_count": None,
    "metadata": {},
    "outputs": [],
    "source": [
@@ -113,7 +115,7 @@
   },
   {
    "cell_type": "code",
-   "execution_count": null,
+   "execution_count": None,
    "metadata": {},
    "outputs": [],
    "source": [
@@ -156,7 +158,7 @@
   },
   {
    "cell_type": "code",
-   "execution_count": null,
+   "execution_count": None,
    "metadata": {},
    "outputs": [],
    "source": [
@@ -196,7 +198,7 @@
   },
   {
    "cell_type": "code",
-   "execution_count": null,
+   "execution_count": None,
    "metadata": {},
    "outputs": [],
    "source": [
@@ -304,3 +306,6 @@
  "nbformat": 4,
  "nbformat_minor": 4
 }
+
+with open(r'D:\\UIT\\1003_EPA_PROJECT\\1.0.0\\1003_EPA-Project_UIT\\transformer based\\kaggle_notebook.ipynb', 'w', encoding='utf-8') as f:
+    json.dump(notebook, f, indent=1)

@@ -53,4 +53,4 @@ class VolatilityDataset(Dataset):
         y_vol_tensor = torch.tensor(y_vol, dtype=torch.float32) # [21]
         y_ret_tensor = torch.tensor(y_ret, dtype=torch.float32) # [21]
         
-        return x_tensor, y_vol_tensor, y_ret_tensor
+        return x_tensor, y_vol_tensor, y_ret_tensor, t
