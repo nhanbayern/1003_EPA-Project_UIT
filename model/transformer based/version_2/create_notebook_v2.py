@@ -36,7 +36,7 @@ cells.append(new_code_cell("""\
 DATA_DIR = '/kaggle/input/datasets/trnhngv/historical-price'
 HORIZONS = [1, 3, 5, 10, 21]
 EVAL_INDICES = [0, 2, 4, 9, 20] # Indices corresponding to the horizons in the 21-length output
-BATCH_SIZE = 32
+BATCH_SIZE = 128
 EPOCHS = 30
 LR = 1e-3
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -258,9 +258,9 @@ for tier_name, config in TIERS_CONFIG.items():
         ds_val = VolatilityDataset(df_val, lookback=60, horizon=21)
         ds_test = VolatilityDataset(df_test, lookback=60, horizon=21)
         
-        train_loader = DataLoader(ds_train, batch_size=BATCH_SIZE, shuffle=True)
-        val_loader = DataLoader(ds_val, batch_size=BATCH_SIZE, shuffle=False)
-        test_loader = DataLoader(ds_test, batch_size=BATCH_SIZE, shuffle=False)
+        train_loader = DataLoader(ds_train, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True)
+        val_loader = DataLoader(ds_val, batch_size=BATCH_SIZE, shuffle=False, pin_memory=True)
+        test_loader = DataLoader(ds_test, batch_size=BATCH_SIZE, shuffle=False, pin_memory=True)
         
         # Initialize models with the current Tier's config
         models_dict = {

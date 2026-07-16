@@ -16,7 +16,7 @@
 ## 2. Quy trình Xử lý Dữ liệu (Data Preprocessing)
 Tạo class `Dataset` trong PyTorch thực hiện:
 1. Đọc dữ liệu `close`, tính tỷ suất sinh lợi ngày: $r_t = \ln(P_t / P_{t-1}) \times 100$.
-2. Tính toán Target Volatility $\sigma_{t,h}$ theo cửa sổ 60 ngày như định nghĩa trong `docs/data.md`.
+2. Tính toán Target Volatility $\sigma_{t,h}$ theo cửa sổ 60 ngày. *(Lưu ý Tối ưu: Để tránh thắt cổ chai CPU, sử dụng `pandas.Series.rolling(window=60).std()` để tính trước (precompute) toàn bộ độ lệch chuẩn trong `__init__` thay vì tính lặp lại trong `__getitem__`)*.
 3. Cắt cửa sổ trượt (Sliding Windows):
    - **X (Input):** $r_{t-60}$ đến $r_{t-1}$ (shape: `[batch_size, 60, 1]`).
    - **Y (Target):** $\sigma_{t,h}$ cho toàn bộ $H=21$ (shape: `[batch_size, 21]`). Khi đánh giá sẽ trích xuất tại các mốc $h \in \{1, 3, 5, 10, 21\}$ theo đúng `docs/problem.md`.
@@ -50,6 +50,7 @@ Tất cả các mô hình sẽ kế thừa một bộ khung chuẩn và chỉ kh
   - Bậc tự do $\nu$ sẽ **không dự báo động** mà được **tính toán tĩnh trước** từ hệ số nhọn dư (excess kurtosis $k$) của tập **Train** riêng biệt cho từng chỉ số theo công thức $\nu = 4 + 6/k$.
   - Các mô hình chỉ cần dự báo 1 đầu ra duy nhất là Volatility $\hat{\sigma}_t$. Hàm Loss sẽ sử dụng giá trị $\nu$ cố định này để tính toán NLL, đảm bảo quá trình training diễn ra ổn định và tránh lỗi nổ gradient (NaN).
 - **Optimizer:** AdamW với learning rate $1e-3$ hoặc $5e-4$, kết hợp Cosine Annealing LR scheduler.
+- **Hardware Optimization:** Sử dụng `BATCH_SIZE = 128` (hoặc lớn hơn đối với mô hình nhỏ) và `pin_memory=True` trong DataLoader để tối đa hóa hiệu năng GPU, khắc phục tình trạng nghẽn cổ chai dữ liệu trên CPU.
 - **Early Stopping:** Dừng nếu validation loss không giảm sau 10 epochs.
 - **Evaluation Metrics:** MSE, MAE, và QLIKE (đặc thù cho volatility).
 

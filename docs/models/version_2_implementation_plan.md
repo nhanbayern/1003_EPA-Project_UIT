@@ -64,6 +64,11 @@ Code cục bộ sẽ được viết tại `D:\UIT\1003_EPA_PROJECT\1.0.0\1003_E
         └── Tier_3/
 ```
 
+### 3. Tối ưu hóa Hiệu suất (Performance Optimization)
+Để giải quyết tình trạng thắt cổ chai CPU (CPU 100%, GPU 0%) khi training các mô hình nhỏ trên Kaggle, các kỹ thuật tối ưu sau đã được áp dụng:
+*   **Precompute Dataset:** Thay vì dùng `np.std` trong vòng lặp `__getitem__` cho từng epoch, sử dụng `pandas.Series.rolling(window=60).std()` để tính trước toàn bộ target trong hàm `__init__`. Điều này giảm độ phức tạp của `__getitem__` xuống O(1).
+*   **Dataloader Optimization:** Nâng `BATCH_SIZE = 128` và bật `pin_memory=True` để tăng tốc độ truyền tải dữ liệu vào GPU, tối đa hóa GPU utilization.
+
 ## Verification Plan
 
 1. **Khởi tạo Code Cục bộ:** Sẽ tiến hành viết và hoàn thiện các file Python trong thư mục `version_2`.
