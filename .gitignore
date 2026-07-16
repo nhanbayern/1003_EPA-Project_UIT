@@ -1,23 +1,24 @@
-.env
-.vscode
-.git
-/__pycache__
-.venv
-notes.txt
-/output
+# Python virtual environments and caches
 __pycache__/
 *.pyc
-.env
 .venv/
+
+# IDE settings
 .vscode/
 .ipynb_checkpoints/
-/related_work
 
+# Environment files
+.env
+
+# Project specific ignores
+notes.txt
+/output
+/related_work
 /model_results
 /notebook
 /.github/prompts
 
-/Morai based/weights
-/Morai based/weights.zip
-
+# Large weights and data
+/model/Morai based/weights
+/model/Morai based/weights.zip
 /results_v2
