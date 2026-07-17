@@ -8,6 +8,7 @@ cells = []
 # Cell 1: Setup
 cells.append(new_code_cell("""\
 !git clone -b kaggle-implementation --single-branch https://github.com/nhanbayern/1003_EPA-Project_UIT.git
+!pip install arch -q
 import sys
 import os
 import torch
