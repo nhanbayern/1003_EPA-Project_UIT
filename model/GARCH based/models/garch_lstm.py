@@ -125,8 +125,8 @@ def evaluate_garch_lstm(model, test_returns, test_variance, seq_len=60, horizons
             pred_vars = np.maximum(pred_vars, 1e-6)
             
             for h in horizons:
-                agg_var = np.mean(pred_vars[:h])
-                vol = np.sqrt(agg_var)
+                # Take conditional std at horizon h: sqrt(sigma2_h)
+                vol = np.sqrt(pred_vars[h - 1])
                 predictions[h].append(vol)
                 
             history_r.append(float(r_next))

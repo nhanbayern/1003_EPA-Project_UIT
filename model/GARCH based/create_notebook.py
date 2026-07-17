@@ -46,7 +46,7 @@ print('Epochs:', EPOCHS)
 print('Batch Size:', BATCH_SIZE)
 """))
 
-# Cell 4: Train Function
+# Cell 4: Train Function — uses model.forward() for teacher forcing
 cells.append(new_code_cell("""\
 def train_garch_lstm_hybrid(model, train_loader, val_loader):
     criterion = TLoss(v=5.0)
@@ -69,7 +69,9 @@ def train_garch_lstm_hybrid(model, train_loader, val_loader):
             enc_r, dec_v, target_r = enc_r.to(DEVICE), dec_v.to(DEVICE), target_r.to(DEVICE)
 
             optimizer.zero_grad(set_to_none=True)
-            pred_var = model.forecast_multi_variance(enc_r, dec_v, max_horizon=1).squeeze(-1)
+            # Use forward() with teacher forcing — more efficient for training
+            pred_var_path = model(enc_r, dec_v)  # (batch, seq_len-1)
+            pred_var = pred_var_path[:, -1]  # Last step prediction
             
             loss = criterion(pred_var, target_r)
             loss.backward()
@@ -84,7 +86,8 @@ def train_garch_lstm_hybrid(model, train_loader, val_loader):
         with torch.no_grad():
             for enc_r, dec_v, target_r, _ in val_loader:
                 enc_r, dec_v, target_r = enc_r.to(DEVICE), dec_v.to(DEVICE), target_r.to(DEVICE)
-                pred_var = model.forecast_multi_variance(enc_r, dec_v, max_horizon=1).squeeze(-1)
+                pred_var_path = model(enc_r, dec_v)
+                pred_var = pred_var_path[:, -1]
                 val_losses.append(float(criterion(pred_var, target_r).item()))
 
         val_loss = float(np.mean(val_losses)) if val_losses else train_loss
@@ -127,18 +130,23 @@ else:
         index_name = Path(csv_file).stem.upper()
         print(f"\\n{'='*50}\\nProcessing {index_name}\\n{'='*50}")
         
-        # 1. Data Prep
-        train_loader, val_loader, test_r, test_v, test_time = get_dataloaders(csv_file, batch_size=BATCH_SIZE)
-        
+        # 1. Data Prep — compute returns/vol on full series, split on raw indices
         close_series = load_close_series(csv_file)
         returns, volatility = prepare_series(close_series)
-        train_end, val_end = get_split_indices(len(returns), index_name)
+        train_end, val_end = get_split_indices(len(close_series), index_name)
         
-        # We need the full history up to the test set for rolling forecast
-        stat_train_r = returns.iloc[:val_end]
-        stat_test_r = returns.iloc[val_end:]
+        # Get dataloaders for GARCH-LSTM training
+        train_loader, val_loader, test_r, test_v, test_time = get_dataloaders(csv_file, batch_size=BATCH_SIZE)
+        
+        # Stat model data: history = all returns up to val_end, test = from val_end onwards
+        # Filter out NaN values for stat model fitting
+        stat_train_r = returns.iloc[:val_end].dropna()
+        stat_test_r = returns.iloc[val_end:].dropna()
         stat_test_time = returns.index[val_end:]
         stat_test_v = volatility.iloc[val_end:]
+        
+        print(f"  Train+Val returns: {len(stat_train_r)}, Test returns: {len(stat_test_r)}")
+        print(f"  Test period: {stat_test_time[0]} to {stat_test_time[-1]}")
         
         # 2. Train and Evaluate Statistical Models
         for stat_model_name in MODEL_SPECS.keys():
@@ -150,7 +158,10 @@ else:
                 horizons=HORIZONS
             )
             
-            save_predictions_csv(index_name, stat_model_name, predictions, stat_test_time, stat_test_r, stat_test_v, pred_dir)
+            save_predictions_csv(
+                index_name, stat_model_name, predictions,
+                stat_test_time, stat_test_r, volatility, val_end, pred_dir
+            )
             plot_predictions(index_name, stat_model_name, predictions, stat_test_time, stat_test_v, viz_dir, horizon=21)
             
             param_df = pd.DataFrame(params)
@@ -163,12 +174,16 @@ else:
         
         torch.save(model.state_dict(), f"{model_dir}/{index_name}_GARCH_LSTM_weights.pth")
         
+        # test_r and test_v from get_dataloaders include seq_len lookback window
         lstm_predictions = evaluate_garch_lstm(
             model, test_r, test_v, 
             seq_len=DEFAULT_SEQ_LEN, horizons=HORIZONS, device=DEVICE
         )
         
-        save_predictions_csv(index_name, "GARCH-LSTM-Hybrid", lstm_predictions, test_time, test_r.iloc[DEFAULT_SEQ_LEN:], test_v.iloc[DEFAULT_SEQ_LEN:], pred_dir)
+        save_predictions_csv(
+            index_name, "GARCH-LSTM-Hybrid", lstm_predictions,
+            test_time, test_r.iloc[DEFAULT_SEQ_LEN:], volatility, val_end, pred_dir
+        )
         plot_predictions(index_name, "GARCH-LSTM-Hybrid", lstm_predictions, test_time, test_v.iloc[DEFAULT_SEQ_LEN:], viz_dir, horizon=21)
 
 print('\\nALL TASKS DONE! Check /kaggle/working/results/')

@@ -57,23 +57,31 @@ def load_close_series(csv_path):
 def prepare_series(close_prices, volatility_window=60):
     """
     Compute log-returns and 60-day rolling volatility from close prices.
-    Returns: ln(Close_t / Close_{t-1}) * 100
-    Vol: sqrt(mean((r_t - mean(r))^2)) over past 60 returns * 100
+    
+    Returns are in percentage scale: ln(Close_t / Close_{t-1}) * 100
+    Volatility uses shift(1) to ensure causality: at time t, vol is computed
+    from returns ending at t-1, matching the definition in problem.md.
+    
+    Returns and volatility are aligned but may contain NaN at the beginning.
+    NaN rows are NOT dropped here to preserve raw data indexing for splits.
     """
     close = pd.Series(close_prices).dropna().astype(float)
     if close.empty:
         raise ValueError("close_prices is empty")
 
-    returns = np.log(close / close.shift(1)).dropna()
-    volatility = returns.rolling(window=int(volatility_window)).std(ddof=0).dropna()
-    returns = returns.loc[volatility.index]
-
-    returns = returns * 100.0
-    volatility = volatility * 100.0
+    returns = np.log(close / close.shift(1)) * 100.0
+    # shift(1): vol at time t = std(returns[t-60 : t-1]), ensuring causality
+    volatility = returns.rolling(window=int(volatility_window)).std(ddof=0).shift(1)
 
     return returns, volatility
 
-def get_split_indices(n_samples, dataset_name):
+def get_split_indices(n_raw_samples, dataset_name):
+    """
+    Get split indices based on FIXED_SPLITS.
+    These indices are applied to the RAW data (close prices after loading),
+    NOT to the processed returns/volatility series.
+    This ensures alignment with Moirai and Transformer pipelines.
+    """
     norm_name = _normalize_dataset_name(dataset_name)
     if norm_name not in FIXED_SPLITS:
         raise ValueError(f"Dataset '{dataset_name}' not in FIXED_SPLITS")
@@ -81,10 +89,18 @@ def get_split_indices(n_samples, dataset_name):
     train_cnt, val_cnt, test_cnt = FIXED_SPLITS[norm_name]
     return train_cnt, train_cnt + val_cnt
 
-def save_predictions_csv(index_name, model_name, predictions_dict, test_time, test_r, test_v, out_dir):
+def save_predictions_csv(index_name, model_name, predictions_dict, test_time, 
+                         test_r, full_volatility, test_start_idx, out_dir):
     """
-    Saves predictions in the format: time, log_return, horizon, true_volatility, predict_volatility
-    predictions_dict: {horizon: array_of_predicted_volatilities}
+    Saves predictions in a format aligned with Moirai output:
+    dataset, model, horizon, time, actual_vol, pred_vol
+    
+    For horizon h, true_volatility (actual_vol) is volatility at index (test_start_idx + i + h - 1),
+    matching Target_{t,h} = sigma_{t+h-1} from problem.md.
+    
+    Parameters:
+    - full_volatility: the FULL volatility series (not just test) for correct multi-horizon alignment
+    - test_start_idx: the global index where test set begins in the full series
     """
     records = []
     horizons = sorted(list(predictions_dict.keys()))
@@ -93,17 +109,38 @@ def save_predictions_csv(index_name, model_name, predictions_dict, test_time, te
         preds = predictions_dict[h]
         valid_len = len(preds)
         
-        align_time = test_time[-valid_len:]
-        align_r = test_r[-valid_len:]
-        align_v = test_v[-valid_len:]
-        
         for i in range(valid_len):
+            # Global index for this prediction origin
+            global_idx = test_start_idx + i
+            # Target index for horizon h
+            target_idx = global_idx + h - 1
+            
+            # Get true volatility at t+h-1
+            if target_idx < len(full_volatility):
+                true_vol = full_volatility.iloc[target_idx]
+                if pd.isna(true_vol):
+                    true_vol = np.nan
+            else:
+                true_vol = np.nan
+            
+            # Get time and return for this prediction origin
+            if i < len(test_time):
+                time_val = test_time[i] if not isinstance(test_time, pd.DatetimeIndex) else test_time[i]
+            else:
+                time_val = None
+                
+            if isinstance(test_r, pd.Series):
+                log_ret = test_r.iloc[i] if i < len(test_r) else np.nan
+            else:
+                log_ret = test_r[i] if i < len(test_r) else np.nan
+            
             records.append({
-                "time": align_time[i],
-                "log_return": align_r.iloc[i] if isinstance(align_r, pd.Series) else align_r[i],
+                "dataset": index_name,
+                "model": model_name,
                 "horizon": h,
-                "true_volatility": align_v.iloc[i] if isinstance(align_v, pd.Series) else align_v[i],
-                "predict_volatility": preds[i]
+                "time": time_val,
+                "actual_vol": true_vol,
+                "pred_vol": preds[i]
             })
             
     df = pd.DataFrame(records)
