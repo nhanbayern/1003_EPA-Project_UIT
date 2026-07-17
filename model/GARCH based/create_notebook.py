@@ -158,7 +158,7 @@ else:
             
         # 3. Train and Evaluate GARCH-LSTM Hybrid
         print(f"--- Running GARCH-LSTM Hybrid ---")
-        model = GARCHLSTMHybrid(hidden_size=16)
+        model = GARCHLSTMHybrid(hidden_size=16).to(DEVICE)
         model, history = train_garch_lstm_hybrid(model, train_loader, val_loader)
         
         torch.save(model.state_dict(), f"{model_dir}/{index_name}_GARCH_LSTM_weights.pth")
