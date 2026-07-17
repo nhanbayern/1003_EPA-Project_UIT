@@ -30,8 +30,11 @@ def get_default_dataset_dir():
     if kaggle_path.exists():
         return kaggle_path
     
-    # Fallback to local path for testing
-    return Path(__file__).resolve().parents[3] / "dataset"
+    # Fallback to local path for testing (safe for Jupyter)
+    try:
+        return Path(__file__).resolve().parents[3] / "dataset"
+    except NameError:
+        return Path.cwd() / "dataset"
 
 def load_close_series(csv_path):
     """Load close prices from CSV into pandas Series."""
