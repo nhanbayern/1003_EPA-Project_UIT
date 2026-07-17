@@ -92,11 +92,12 @@ class GARCHLSTMHybrid(nn.Module):
         forecasts = []
         for h in range(max_horizon):
             sigma2_t, c_t = self.cell(eps_prev, sigma2_prev, c_t)
-            forecasts.append(sigma2_t.mean(dim=-1, keepdim=True))
+            sigma2_scalar = sigma2_t.mean(dim=-1, keepdim=True)
+            forecasts.append(sigma2_scalar)
             
             # For next step: we don't have true return, expected return is 0
             eps_prev = torch.zeros_like(eps_prev) 
-            sigma2_prev = sigma2_t
+            sigma2_prev = sigma2_scalar
 
         return torch.cat(forecasts, dim=1) # shape: (batch_size, max_horizon)
 
