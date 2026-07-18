@@ -35,7 +35,6 @@ from config import DEFAULT_SEQ_LEN, DEFAULT_VOL_WINDOW, HORIZONS, BATCH_SIZE, EP
 from dataset import get_dataloaders
 from losses import TLoss
 from utils import get_default_dataset_dir, load_close_series, prepare_series, get_split_indices, save_predictions_csv, plot_predictions
-from models.stat_models import evaluate_stat_model, MODEL_SPECS
 from models.garch_lstm import GARCHLSTMHybrid, evaluate_garch_lstm
 """))
 
@@ -47,7 +46,7 @@ print('Epochs:', EPOCHS)
 print('Batch Size:', BATCH_SIZE)
 """))
 
-# Cell 4: Train Function — uses model.forward() for teacher forcing
+# Cell 4: Train Function
 cells.append(new_code_cell("""\
 def train_garch_lstm_hybrid(model, train_loader, val_loader):
     criterion = TLoss(v=5.0)
@@ -136,36 +135,7 @@ else:
         # Get dataloaders for GARCH-LSTM training
         train_loader, val_loader, test_r, test_v, test_time = get_dataloaders(csv_file, batch_size=BATCH_SIZE)
         
-        # Stat model data: history = all returns up to val_end, test = from val_end onwards
-        # Filter out NaN values for stat model fitting
-        stat_train_r = returns.iloc[:val_end].dropna()
-        stat_test_r = returns.iloc[val_end:].dropna()
-        stat_test_time = returns.index[val_end:]
-        stat_test_v = volatility.iloc[val_end:]
-        
-        print(f"  Train+Val returns: {len(stat_train_r)}, Test returns: {len(stat_test_r)}")
-        print(f"  Test period: {stat_test_time[0]} to {stat_test_time[-1]}")
-        
-        # 2. Train and Evaluate Statistical Models
-        for stat_model_name in MODEL_SPECS.keys():
-            print(f"--- Running {stat_model_name} ---")
-            predictions, params = evaluate_stat_model(
-                stat_train_r, stat_test_r, 
-                model_name=stat_model_name, 
-                dist="t", 
-                horizons=HORIZONS
-            )
-            
-            save_predictions_csv(
-                index_name, stat_model_name, predictions,
-                stat_test_time, stat_test_r, volatility, val_end, pred_dir
-            )
-            plot_predictions(index_name, stat_model_name, predictions, stat_test_time, stat_test_v, viz_dir, horizon=21)
-            
-            param_df = pd.DataFrame(params)
-            param_df.to_csv(f"{model_dir}/{index_name}_{stat_model_name}_params.csv", index=False)
-            
-        # 3. Train and Evaluate GARCH-LSTM Hybrid
+        # Only evaluate GARCH-LSTM Hybrid
         print(f"--- Running GARCH-LSTM Hybrid ---")
         model = GARCHLSTMHybrid(hidden_size=16).to(DEVICE)
         model, history = train_garch_lstm_hybrid(model, train_loader, val_loader)
@@ -190,6 +160,6 @@ print('\\nALL TASKS DONE! Check /kaggle/working/results/')
 nb.cells = cells
 
 # Use absolute path assuming it will be run in Cwd
-with open('D:/UIT/1003_EPA_PROJECT/1.0.0/1003_EPA-Project_UIT/model/GARCH based/GARCH_Kaggle_Pipeline.ipynb', 'w', encoding='utf-8') as f:
+with open('D:/UIT/1003_EPA_PROJECT/1.0.0/1003_EPA-Project_UIT/model/GARCH based/GARCH_LSTM_Only_Kaggle_Pipeline.ipynb', 'w', encoding='utf-8') as f:
     nbformat.write(nb, f)
-print('Notebook regenerated successfully.')
+print('Notebook generated successfully.')

@@ -41,11 +41,24 @@ class GARCH_LSTM_Cell(nn.Module):
 
         return sigma2_t, c_t
 
+class VolatilityHead(nn.Module):
+    def __init__(self, in_features, hidden_dim=64, out_features=21):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_features, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, out_features),
+            nn.Softplus()
+        )
+    def forward(self, x):
+        return self.net(x)
+
 class GARCHLSTMHybrid(nn.Module):
-    def __init__(self, hidden_size=16):
+    def __init__(self, hidden_size=16, out_features=21):
         super().__init__()
         self.hidden_size = hidden_size
         self.cell = GARCH_LSTM_Cell(input_size=2, hidden_size=hidden_size)
+        self.head = VolatilityHead(in_features=hidden_size, hidden_dim=64, out_features=out_features)
 
     def forward(self, encoder_returns, decoder_variance):
         if encoder_returns.dim() == 1:
@@ -57,49 +70,15 @@ class GARCHLSTMHybrid(nn.Module):
         c_t = torch.zeros(batch_size, self.hidden_size, device=encoder_returns.device)
 
         sigma2_prev = decoder_variance[:, 0:1]
-        sigma2_path = []
 
-        for t in range(1, seq_len):
-            eps_prev = encoder_returns[:, t - 1 : t]
-            sigma2_t, c_t = self.cell(eps_prev, sigma2_prev, c_t)
-            sigma2_scalar = sigma2_t.mean(dim=-1, keepdim=True)
-            sigma2_path.append(sigma2_scalar)
-            sigma2_prev = decoder_variance[:, t : t + 1]
-
-        if sigma2_path:
-            return torch.cat(sigma2_path, dim=1)
-        return torch.zeros(batch_size, 0, device=encoder_returns.device)
-
-    def forecast_multi_variance(self, encoder_returns, decoder_variance, max_horizon=21):
-        if encoder_returns.dim() == 1:
-            encoder_returns = encoder_returns.unsqueeze(0)
-        if decoder_variance.dim() == 1:
-            decoder_variance = decoder_variance.unsqueeze(0)
-
-        batch_size, seq_len = encoder_returns.shape
-        c_t = torch.zeros(batch_size, self.hidden_size, device=encoder_returns.device)
-
-        sigma2_prev = decoder_variance[:, 0:1]
-
-        # Process historical window
         for t in range(1, seq_len):
             eps_prev = encoder_returns[:, t - 1 : t]
             _, c_t = self.cell(eps_prev, sigma2_prev, c_t)
             sigma2_prev = decoder_variance[:, t : t + 1]
 
-        # Forecast h steps
-        eps_prev = encoder_returns[:, -1:]
-        forecasts = []
-        for h in range(max_horizon):
-            sigma2_t, c_t = self.cell(eps_prev, sigma2_prev, c_t)
-            sigma2_scalar = sigma2_t.mean(dim=-1, keepdim=True)
-            forecasts.append(sigma2_scalar)
-            
-            # For next step: we don't have true return, expected return is 0
-            eps_prev = torch.zeros_like(eps_prev) 
-            sigma2_prev = sigma2_scalar
-
-        return torch.cat(forecasts, dim=1) # shape: (batch_size, max_horizon)
+        # Dự báo toàn bộ các horizon cùng lúc qua Linear Head
+        out = self.head(c_t) # shape: (batch_size, out_features)
+        return out
 
 def evaluate_garch_lstm(model, test_returns, test_variance, seq_len=60, horizons=[1, 3, 5, 10, 21], device="cpu"):
     device = torch.device(device)
@@ -112,7 +91,6 @@ def evaluate_garch_lstm(model, test_returns, test_variance, seq_len=60, horizons
     test_r = np.asarray(test_returns[seq_len:], dtype=float)
     test_v = np.asarray(test_variance[seq_len:], dtype=float)
     
-    max_h = max(horizons)
     predictions = {h: [] for h in horizons}
     
     with torch.no_grad():
@@ -120,12 +98,12 @@ def evaluate_garch_lstm(model, test_returns, test_variance, seq_len=60, horizons
             enc_r = torch.tensor(history_r[-seq_len:], dtype=torch.float32, device=device).unsqueeze(0)
             dec_v = torch.tensor(history_v[-seq_len:], dtype=torch.float32, device=device).unsqueeze(0)
             
-            pred_var_t = model.forecast_multi_variance(enc_r, dec_v, max_horizon=max_h) # (1, max_h)
+            # (1, 21)
+            pred_var_t = model(enc_r, dec_v) 
             pred_vars = pred_var_t[0].cpu().numpy()
             pred_vars = np.maximum(pred_vars, 1e-6)
             
             for h in horizons:
-                # Take conditional std at horizon h: sqrt(sigma2_h)
                 vol = np.sqrt(pred_vars[h - 1])
                 predictions[h].append(vol)
                 

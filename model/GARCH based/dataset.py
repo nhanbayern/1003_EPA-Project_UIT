@@ -5,10 +5,10 @@ import numpy as np
 from config import DEFAULT_SEQ_LEN
 from utils import load_close_series, prepare_series, get_split_indices
 
-def create_sliding_windows(returns, volatility, seq_len=DEFAULT_SEQ_LEN):
+def create_sliding_windows(returns, volatility, seq_len=DEFAULT_SEQ_LEN, max_horizon=21):
     """
-    Create sliding windows for training (target horizon=1).
-    GARCH-LSTM is trained with h=1, and recursively predicts during testing.
+    Create sliding windows for training (target is max_horizon steps).
+    GARCH-LSTM is now trained using Direct Multi-step Forecasting.
     
     Skips windows where any value is NaN (handles the initial NaN region
     from rolling std + shift).
@@ -17,8 +17,7 @@ def create_sliding_windows(returns, volatility, seq_len=DEFAULT_SEQ_LEN):
     v = pd.Series(volatility).astype(float)
     n = min(len(r), len(v))
 
-    horizon = 1
-    max_start = n - seq_len - horizon + 1
+    max_start = n - seq_len - max_horizon + 1
 
     windows = {
         "encoder_returns": [],
@@ -30,17 +29,17 @@ def create_sliding_windows(returns, volatility, seq_len=DEFAULT_SEQ_LEN):
     for i in range(max_start):
         r_window = r.iloc[i : i + seq_len]
         v_window = v.iloc[i : i + seq_len]
-        target_r = r.iloc[i + seq_len + horizon - 1]
-        target_v = v.iloc[i + seq_len + horizon - 1]
+        target_r = r.iloc[i + seq_len : i + seq_len + max_horizon]
+        target_v = v.iloc[i + seq_len : i + seq_len + max_horizon]
         
         # Skip windows with any NaN values
-        if r_window.isna().any() or v_window.isna().any() or pd.isna(target_r) or pd.isna(target_v):
+        if r_window.isna().any() or v_window.isna().any() or target_r.isna().any() or target_v.isna().any():
             continue
         
         windows["encoder_returns"].append(r_window.values)
         windows["decoder_volatility"].append(v_window.values)
-        windows["target_returns"].append(float(target_r))
-        windows["target_variance"].append(float(target_v))
+        windows["target_returns"].append(target_r.values)
+        windows["target_variance"].append(target_v.values)
 
     return {k: np.asarray(v, dtype=np.float32) for k, v in windows.items()}
 
@@ -62,7 +61,7 @@ class GARCHDataset(Dataset):
             self.target_variance[idx]
         )
 
-def get_dataloaders(csv_path, batch_size=32, seq_len=DEFAULT_SEQ_LEN):
+def get_dataloaders(csv_path, batch_size=32, seq_len=DEFAULT_SEQ_LEN, max_horizon=21):
     """
     Load data, compute returns/volatility on FULL series, then split using
     FIXED_SPLITS indices on the RAW data positions.
@@ -98,8 +97,8 @@ def get_dataloaders(csv_path, batch_size=32, seq_len=DEFAULT_SEQ_LEN):
     # Test time is only the actual test period (from val_end onwards)
     test_time = returns.index[val_end:]
     
-    train_data = create_sliding_windows(train_r, train_v, seq_len)
-    val_data = create_sliding_windows(val_r, val_v, seq_len)
+    train_data = create_sliding_windows(train_r, train_v, seq_len, max_horizon)
+    val_data = create_sliding_windows(val_r, val_v, seq_len, max_horizon)
     
     train_loader = DataLoader(GARCHDataset(train_data), batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(GARCHDataset(val_data), batch_size=batch_size, shuffle=False)
