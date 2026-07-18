@@ -22,3 +22,8 @@ notes.txt
 /model/Morai based/weights
 /model/Morai based/weights.zip
 /results_v2
+
+# Generated analysis outputs
+/output/**/*.csv
+/output/**/*.png
+
