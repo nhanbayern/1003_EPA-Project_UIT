@@ -2,8 +2,6 @@ from .analyzer import AnalysisResult, StatsAnalysisPipeline
 from .config import StatsAnalysisConfig
 from .data_loader import LoadReport, PredictionDataLoader
 from .metrics import ForecastMetrics
-from .prediction_dashboard import PredictionPlotlyDashboard
-from .prediction_plots import PredictionPlotConfig, PredictionTimeSeriesPlotter
 from .risk import (
     FilteredHistoricalVaRMethod,
     NormalVaRMethod,
@@ -12,6 +10,17 @@ from .risk import (
     VaRMethod,
     VarBacktester,
 )
+
+try:
+    from .prediction_dashboard import PredictionPlotlyDashboard
+except ModuleNotFoundError:
+    PredictionPlotlyDashboard = None
+
+try:
+    from .prediction_plots import PredictionPlotConfig, PredictionTimeSeriesPlotter
+except ModuleNotFoundError:
+    PredictionPlotConfig = None
+    PredictionTimeSeriesPlotter = None
 
 __all__ = [
     "AnalysisResult",
