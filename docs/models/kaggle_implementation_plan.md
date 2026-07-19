@@ -6,23 +6,28 @@
 ## 1. Môi trường và Dữ liệu (Kaggle Environment & Data)
 - **Đường dẫn dữ liệu trên Kaggle:** `/kaggle/input/datasets/trnhngv/historical-price`
 - **Đầu vào (Input):** Các file CSV của 9 chỉ số chứng khoán (VN30, DAX_40, ...).
-- **Các thư viện cần thiết:** `torch`, `numpy`, `pandas`, `scikit-learn` (Không dùng các thư viện có sẵn mã nguồn Transformer phức tạp, sẽ code PyTorch từ đầu để đảm bảo tính tinh gọn và kiểm soát được cấu trúc mạng).
+- **Phương thức đồng bộ (Git-Sync):**
+  - Repository URL (Public): `https://github.com/nhanbayern/1003_EPA-Project_UIT.git`
+  - Nhánh làm việc: `kaggle-implementation`
+  - Thư mục code cục bộ: `transformer based` (đường dẫn tuyệt đối: `D:\UIT\1003_EPA_PROJECT\1.0.0\1003_EPA-Project_UIT\transformer based`)
+  - Lệnh clone trên Kaggle: `!git clone -b kaggle-implementation --single-branch https://github.com/nhanbayern/1003_EPA-Project_UIT.git`
+- **Các thư viện cần thiết:** `torch`, `numpy`, `pandas`, `scikit-learn` (Code PyTorch thuần từ đầu để đảm bảo tính tinh gọn và kiểm soát được cấu trúc mạng).
 
 ## 2. Quy trình Xử lý Dữ liệu (Data Preprocessing)
 Tạo class `Dataset` trong PyTorch thực hiện:
 1. Đọc dữ liệu `close`, tính tỷ suất sinh lợi ngày: $r_t = \ln(P_t / P_{t-1}) \times 100$.
-2. Tính toán Target Volatility $\sigma_{t,h}$ theo cửa sổ 60 ngày như định nghĩa trong `docs/data.md`.
+2. Tính toán Target Volatility $\sigma_{t,h}$ theo cửa sổ 60 ngày. *(Lưu ý Tối ưu: Để tránh thắt cổ chai CPU, sử dụng `pandas.Series.rolling(window=60).std()` để tính trước (precompute) toàn bộ độ lệch chuẩn trong `__init__` thay vì tính lặp lại trong `__getitem__`)*.
 3. Cắt cửa sổ trượt (Sliding Windows):
    - **X (Input):** $r_{t-60}$ đến $r_{t-1}$ (shape: `[batch_size, 60, 1]`).
-   - **Y (Target):** $\sigma_{t,h}$ với $h \in \{1, 3, 5, 10, 21\}$ (shape: `[batch_size, 5]`).
+   - **Y (Target):** $\sigma_{t,h}$ cho toàn bộ $H=21$ (shape: `[batch_size, 21]`). Khi đánh giá sẽ trích xuất tại các mốc $h \in \{1, 3, 5, 10, 21\}$ theo đúng `docs/problem.md`.
 4. **Chia tập (Split):** Thực hiện chia Train/Val/Test theo tỷ lệ (dựa theo data.md).
 
 ## 3. Kiến trúc Mô hình Tinh gọn (Miniaturized Architectures)
 Tất cả các mô hình sẽ kế thừa một bộ khung chuẩn và chỉ khác biệt ở module Attention.
 ### 3.1. Các thành phần chung
-- **RevIN (Reversible Instance Normalization):** Chuẩn hóa đầu vào $X$ trước khi vào mạng và dùng tham số đó để giải chuẩn hóa ở đầu ra. Giúp mạng học tốt dữ liệu phi quy chuẩn.
+- **PackedStdScaler:** Bộ chuẩn hóa động đầu vào $X$ trước khi đưa vào mạng (sử dụng thay vì RevIN để bám sát hoàn toàn Mục V trong `docs/problem.md`).
 - **Token Embedding + Positional Encoding:** Nhúng 60 ngày giá trị vào không gian `d_model = 32`.
-- **Output Projection:** Lớp Linear mapping từ không gian ẩn ra 5 giá trị dự báo cho 5 horizon $h$.
+- **Output Projection:** Lớp Linear mapping từ không gian ẩn ra 21 giá trị dự báo tương ứng với $H=21$.
 
 ### 3.2. Cấu hình cụ thể cho từng mạng
 *Giảm kích thước đáng kể so với bản gốc để tránh overfitting.*
@@ -45,21 +50,16 @@ Tất cả các mô hình sẽ kế thừa một bộ khung chuẩn và chỉ kh
   - Bậc tự do $\nu$ sẽ **không dự báo động** mà được **tính toán tĩnh trước** từ hệ số nhọn dư (excess kurtosis $k$) của tập **Train** riêng biệt cho từng chỉ số theo công thức $\nu = 4 + 6/k$.
   - Các mô hình chỉ cần dự báo 1 đầu ra duy nhất là Volatility $\hat{\sigma}_t$. Hàm Loss sẽ sử dụng giá trị $\nu$ cố định này để tính toán NLL, đảm bảo quá trình training diễn ra ổn định và tránh lỗi nổ gradient (NaN).
 - **Optimizer:** AdamW với learning rate $1e-3$ hoặc $5e-4$, kết hợp Cosine Annealing LR scheduler.
+- **Hardware Optimization:** Sử dụng `BATCH_SIZE = 128` (hoặc lớn hơn đối với mô hình nhỏ) và `pin_memory=True` trong DataLoader để tối đa hóa hiệu năng GPU, khắc phục tình trạng nghẽn cổ chai dữ liệu trên CPU.
 - **Early Stopping:** Dừng nếu validation loss không giảm sau 10 epochs.
 - **Evaluation Metrics:** MSE, MAE, và QLIKE (đặc thù cho volatility).
 
-## 5. Tổ chức file Notebook (`.ipynb`)
-Cấu trúc file `kaggle_notebook.ipynb` sẽ bao gồm các cell sau:
-- **Cell 1:** Import thư viện.
-- **Cell 2:** Các hàm tính toán tài chính (log returns, target volatility).
-- **Cell 3:** PyTorch Dataset & Dataloaders (Tích hợp logic sliding window).
-- **Cell 4:** Modules dùng chung (RevIN, Embedding, TimeFeature).
-- **Cell 5:** Source code Transformer gốc thu nhỏ.
-- **Cell 6:** Source code Autoformer gốc thu nhỏ.
-- **Cell 7:** Source code Informer gốc thu nhỏ.
-- **Cell 8:** Source code Reformer gốc thu nhỏ.
-- **Cell 9:** Vòng lặp Training (Train Loop) & Testing.
-- **Cell 10:** Hàm main để chạy lần lượt 4 mô hình và in ra bảng so sánh kết quả.
+## 5. Tổ chức Thư mục Code Cục bộ (`transformer based`)
+Chúng ta sẽ viết code cục bộ trong thư mục `transformer based` và đẩy lên nhánh `kaggle-implementation` để Kaggle clone về chạy. Cấu trúc thư mục gồm:
+1. `models.py`: Định nghĩa 4 mô hình Transformer tinh gọn (Vanilla, Autoformer, Informer, Reformer) kèm theo bộ chuẩn hóa `PackedStdScaler`.
+2. `dataset.py`: Định nghĩa lớp `VolatilityDataset` chịu trách nhiệm tính toán log return, tính toán target $\sigma_{t,h}$ và cắt cửa sổ trượt $L=60$.
+3. `utils.py`: Hàm ước lượng bậc tự do $\nu$ tĩnh từ tập Train cho từng chỉ số, tính toán metrics (MSE, MAE, QLIKE), và các hàm tiện ích vẽ biểu đồ.
+4. `kaggle_notebook.ipynb`: Notebook chính để chạy trên Kaggle. Notebook này sẽ clone code từ Git, nạp dữ liệu, thực thi vòng lặp training/testing trên cả 9 chỉ số và lưu trữ kết quả.
 
 ## 6. Tổ chức Thư mục và Định dạng Đầu ra (Outputs)
 - **Tạo thư mục tự động:** Notebook sẽ chứa code để tự động tạo cấu trúc thư mục lưu kết quả trên Kaggle (ví dụ: `/kaggle/working/results/all_predictions`).
@@ -72,6 +72,6 @@ Cấu trúc file `kaggle_notebook.ipynb` sẽ bao gồm các cell sau:
 
 ### YÊU CẦU XÁC NHẬN (USER REVIEW REQUIRED)
 1. **Hàm Loss:** Đã thống nhất sử dụng **Student-t NLL Loss với hằng số $\nu$** tính tĩnh trước từ tập Train của mỗi chỉ số.
-2. **Framework triển khai:** Việc tự viết lại code PyTorch từ đầu trong 1 file notebook sẽ khá dài (khoảng 1000 dòng code). Bạn có đồng ý với hướng tiếp cận gộp tất cả vào 1 file `.ipynb` để chạy trực tiếp trên Kaggle không?
+2. **Framework triển khai:** Đã thống nhất sử dụng **Git-Sync** (nhánh `kaggle-implementation` của repo `nhanbayern/1003_EPA-Project_UIT`). Code được tổ chức dạng module hóa tại thư mục cục bộ `transformer based` để dễ phát triển và bảo trì.
 
-Nếu bạn đồng ý với kế hoạch trên, tôi sẽ bắt đầu viết code cho file `.ipynb` này.
+Kế hoạch đã sẵn sàng, chúng ta có thể chuyển sang giai đoạn tạo các file code nháp cục bộ.
