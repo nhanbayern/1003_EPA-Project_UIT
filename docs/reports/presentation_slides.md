@@ -5,7 +5,7 @@ paginate: true
 ---
 
 # Báo Cáo Cập Nhật Tiến Độ Nghiên Cứu
-**Khung Đánh Giá Hợp Nhất Các Mô Hình Dự Báo Biến Động**
+**Khám Phá Thực Nghiệm: Nghịch Lý Accuracy-Risk Trong Dự Báo Biến Động**
 
 **Người trình bày:** Nguyễn Thiện Nhân, Trần Hùng Vĩ
 **GVHD:** PGS. TS. Nguyễn Đình Thuân
@@ -14,10 +14,10 @@ paginate: true
 
 ## Nội dung trình bày
 
-1. Tóm tắt góp ý từ Reviewer và Nhận diện điểm yếu
-2. Các hướng khắc phục và Quá trình chạy lại mô hình
-3. Phân tích và Diễn giải kết quả thực nghiệm mới
-4. Thảo luận và Đề xuất Khung đánh giá hai tầng
+1. Tóm tắt góp ý từ Reviewer và Định hình lại nghiên cứu
+2. Thiết lập Benchmark toàn diện
+3. Phân tích kết quả: Sự xuất hiện của Nghịch lý Accuracy-Risk
+4. Giải thích học thuật và Đề xuất Khung đánh giá
 5. Tài liệu tham khảo
 
 ---
@@ -25,210 +25,166 @@ paginate: true
 ## 1. Tóm tắt góp ý từ Reviewer
 
 **Điểm mạnh được Reviewer ghi nhận:**
-- Ý tưởng cốt lõi tốt: Đánh giá sự đánh đổi giữa *forecast accuracy* và *risk control*.
+- Ý tưởng đánh giá sự đánh đổi giữa *forecast accuracy* và *risk control*.
 - Quy mô hệ thống benchmark rộng lớn và đa dạng.
 
-**Tuy nhiên, vẫn tồn tại 4 nhóm điểm yếu cốt lõi cần giải quyết.**
+**Tuy nhiên, các điểm yếu cốt lõi cần giải quyết:**
+- Thiếu minh bạch về nguồn gốc dữ liệu, kích thước mẫu.
+- **Quan trọng nhất:** Sự yếu kém và mâu thuẫn của mô hình lai đề xuất cũ (Moirai-MoE-GARCHs), làm giảm tính thuyết phục và "tính mới" (Novelty) của toàn bộ nghiên cứu.
 
 ---
 
-## Các điểm yếu cần khắc phục
+## Định hình lại Cốt lõi Nghiên cứu (Novelty Shift)
 
-1. **Dữ liệu & Thiết lập:** Thiếu minh bạch về nguồn gốc, quy trình và kích thước mẫu (Reviewer 1, 3).
-2. **Kiến trúc Moirai-MoE-GARCHs:** Kết quả yếu kém (pass rate hạng 9/10), mâu thuẫn với khẳng định trong bài (Reviewer 1, 2, 3).
-3. **Phân tích & Thống kê:** Phân tích mang tính bề mặt, chỉ dùng VaR 5%, thiếu các kiểm định thống kê bắt buộc (Reviewer 2).
-4. **Tính mới (Novelty) & Tái tạo:** Thiếu chi tiết siêu tham số (hyperparameters), đóng góp phương pháp luận chưa rõ ràng (Reviewer 2, 3).
+Để bài báo có sức nặng học thuật cao nhất, nhóm nghiên cứu quyết định **loại bỏ hoàn toàn mô hình lai ghép Moirai-MoE-GARCHs**. 
 
----
+Thay vào đó, bài báo sẽ được tái định vị thành một **Khám phá Thực nghiệm (Empirical Discovery)** về một "điểm mù" lớn khi áp dụng Foundation Models vào Quản trị rủi ro:
 
-## 2. Hướng khắc phục: Dữ liệu và Thiết lập
-
-- **Nguồn dữ liệu:** 9 chỉ số toàn cầu từ Investing.com (DAX 40, S&P 500...) và vnstock (VN30, VN-Index).
-- **Tính nhân quả (Causality):** Cửa sổ quá khứ 60 ngày, tuyệt đối không dùng dữ liệu tương lai để dự báo mục tiêu $\sigma_{t,h}$ (tránh look-ahead bias).
-- **Phân tách nhận biết phân phối:** Sử dụng thuật toán chia Train/Val/Test để giữ ổn định phân phối đuôi Student-t (tham số $\nu$), thay vì chia ngẫu nhiên.
+**Nghịch lý Accuracy-Risk:** *Một mô hình có độ chính xác dự báo (MSE) xuất sắc hoàn toàn không đảm bảo khả năng quản trị rủi ro đuôi (VaR) an toàn.*
 
 ---
 
-## Dữ liệu: Bảng kích thước mẫu (2010 - 2025)
+## 2. Thiết lập Benchmark Toàn diện
+
+- **Nguồn dữ liệu:** 9 chỉ số toàn cầu từ Investing.com và vnstock.
+- **Tính nhân quả (Causality):** Tuyệt đối không dùng dữ liệu tương lai (chỉ dùng chuỗi 60 ngày quá khứ).
+- **Thuật toán phân tách:** Giữ ổn định phân phối đuôi Student-t qua các tập Train/Val/Test để đánh giá chính xác rủi ro đuôi hẹp.
+
+**Bảng kích thước mẫu (2010 - 2025)**
 
 | Index | Train | Validation | Test | Total |
 | :--- | :---: | :---: | :---: | :---: |
 | DAX 40 | 1983 | 1104 | 972 | 4059 |
 | S&P 500 | 1988 | 1109 | 927 | 4024 |
-| VN30 | 1971 | 1096 | 925 | 3992 |
-| VN-Index | 1964 | 1103 | 925 | 3992 |
-*(Trích xuất đại diện 4/9 dataset)*
+*(Trích xuất đại diện 2/9 dataset)*
 
 ---
 
-## 2. Hướng khắc phục: Triển khai mô hình (1)
+## Ba Nhóm Mô Hình So Sánh
 
-**Nhóm Kinh tế lượng (GARCH-family)**
-- Mô hình: GARCH, GJR-GARCH, FI-GARCH (Thư viện `arch`).
-- Rolling window 1.000 quan sát, giả định sai số Student-t.
+**1. Foundation Models (Moirai, Moirai-MoE):**
+- Được pre-train trên hàng chục tỷ điểm dữ liệu.
+- Mục tiêu tối ưu: Giảm thiểu sai số trung bình (MSE).
 
-**Nhóm Transformer**
-- Chia 3 cấp độ (Tiers): Miniaturized, Standard, Large nhằm kiểm tra "khủng hoảng dữ liệu" với chuỗi ngắn 60 ngày.
-- Dự báo trực tiếp qua `VolatilityHead`, huấn luyện 30 epochs, AdamW (LR=$10^{-3}$).
+**2. Local Transformers (Autoformer, Informer, v.v.):**
+- Huấn luyện cục bộ trên dữ liệu 60 ngày.
+- **Đặc biệt:** Dùng hàm mất mát Student-t với bậc tự do $\nu$ động, tự động co giãn theo độ dày của đuôi rủi ro thực tế.
 
----
-
-## 2. Hướng khắc phục: Triển khai mô hình (2)
-
-**Mô hình Lai GARCH-LSTM**
-- Tích hợp phương trình phương sai vào thẳng cổng LSTM.
-- **Regularization:** Cố định bậc tự do $v=5.0$ cho loss Student-t NLL.
-- **Dự báo trực tiếp đa bước** thay vì tự hồi quy.
-- **Kết quả:** Sai số (MSE) giảm ngoạn mục từ $1.28 \times 10^6$ xuống $\sim 0.11$.
+**3. Nhóm Kinh tế lượng & GARCH-LSTM:** Làm tham chiếu cơ sở (Baseline).
 
 ---
 
-## Hướng khắc phục: Khẳng định Tính Mới (Novelty)
+## 3. Phân tích kết quả: Mặt trận Dự báo (Point Forecast)
 
-**Loại bỏ Moirai-MoE-GARCHs**
-- Nhận thấy kiến trúc cũ kém hiệu quả, em đã thay thế bằng **Moirai_VAR**.
-- Backbone Moirai (frozen) kết hợp khối hồi quy MLP 2 lớp.
-
-**Điểm nhấn phương pháp luận: Hàm mất mát VaR-Aware Loss**
-- Mô hình truyền thống chỉ tập trung học trung bình (MSE), bỏ qua vùng đuôi rủi ro.
-
----
-
-## Hàm mất mát VaR-Aware (VaR-Aware Loss)
-
-Thiết kế lại hàm mục tiêu:
-$$ \text{Total\_Loss} = \text{MSE}(\text{vol}_{pred}) + \lambda_{var} \times \text{QuantileVaRLoss}(\text{VaR}_{threshold}) $$
-
-- Trọng số $\lambda_{var}=0.2$.
-- Mô hình bị ép "học" tính phân phối đuôi.
-- Bị phạt bằng hàm **Pinball Loss** nếu dự báo đâm thủng ngưỡng VaR.
-
----
-
-## 3. Phân tích kết quả: Độ chính xác (Point Forecast)
-
-**Top Mô hình theo Độ chính xác Dự báo (MSE, MAE, QLIKE)**
+**Top Mô hình theo Độ chính xác Dự báo (MSE, MAE)**
 
 | Rank | Model | MSE | MAE | Avg Rank |
 |---:|---|---:|---:|---:|
 | 1 | Moirai (moirai2) | 0.0227 | 0.0906 | 1.000 |
-| 2 | Moirai_VAR (λ=0.2, moirai2) | 0.0237 | 0.0947 | 2.333 |
-| 3 | Moirai (moirai_moe) | 0.0247 | 0.0975 | 2.667 |
-| 4 | Moirai_VAR (λ=0.2, moirai_moe)| 0.0252 | 0.1014 | 4.000 |
+| 2 | Moirai (moirai_moe) | 0.0247 | 0.0975 | 2.667 |
+| ... | ... | ... | ... | ... |
+| 8 | Autoformer Tier 1 | 0.2241 | 0.3465 | 16.00 |
+
+**Đánh giá:**
+- **Moirai** áp đảo toàn diện ở năng lực dự báo giá trị trung bình (MSE rất thấp).
+- **Transformer cục bộ** (Autoformer) có sai số cao gấp 10 lần Moirai.
 
 ---
 
-## Đánh giá Point Forecast
+## Phân tích kết quả: Mặt trận Quản trị rủi ro (VaR)
 
-- Mô hình foundation **Moirai** áp đảo toàn diện ở năng lực khớp giá trị trung bình (mean path).
-- **Moirai_VAR** dù bị kéo lại bởi thành phần loss rủi ro nhưng vẫn bám rất sát ở Top đầu.
-- GARCH-LSTM (bản mới) không còn là điểm nghẽn về dự báo điểm.
+Tuy nhiên, khi đối chiếu sang năng lực bảo vệ rủi ro (VaR Backtesting) ở ngưỡng cực đoan 1%:
 
----
+| Rank | Model | VaR 1% Pass Rate |
+|---|---|---:|
+| 1 | Autoformer Tier 1 | **35.56%** |
+| 2 | Informer Tier 1 | 28.89% |
+| ... | ... | ... |
+| 8 | Moirai (moirai_moe) | 20.00% |
+| 15 | Moirai (moirai2) | 11.11% |
 
-## 3. Phân tích kết quả: Backtesting (Risk-Control)
-
-**Sự đảo ngôi tại VaR 5% và VaR 1%**
-
-| Khung đánh giá | Vị trí Top 1 | Vị trí Top 2 |
-|---|---|---|
-| **VaR 5% Pass Rate** | Autoformer Tier 2 (24.44%) | Autoformer Tier 1 (20.00%) |
-| **VaR 1% Pass Rate** | Autoformer Tier 1 (35.56%) | Informer Tier 1 (28.89%) |
-
-*(Bổ sung ngưỡng VaR 1% theo yêu cầu của Reviewer)*
+**Nghịch lý xuất hiện:** Dù Moirai có sai số (MSE) thấp gấp 10 lần, nhưng khả năng bảo vệ rủi ro của nó lại **thua xa** Autoformer!
 
 ---
 
-## Đánh giá Risk Control
+## 4. Giải thích Học thuật (1): Lệch pha Hàm Mục Tiêu
 
-- Dù Moirai vô địch về MSE, nhưng **Transformer** (đặc biệt là biến thể nhỏ Tier 1, 2) lại giành chiến thắng tuyệt đối về năng lực kiểm soát rủi ro phân phối.
-- **Chứng minh luận điểm cốt lõi:** Mô hình dự báo biến động chính xác nhất *không đảm bảo* quản trị rủi ro vùng đuôi (Tail Risk) tốt nhất.
+Tại sao Moirai có MSE xuất sắc nhưng VaR lại yếu?
 
----
-
-## 3. Robustness Check: 3 Phương pháp VaR
-
-Quy đổi biến động dự báo sang VaR bằng Normal, Student-t, và FHS.
-
-| VaR (5%) | Violation rate | Abs violation error | Quantile loss |
-|---|---:|---:|---:|
-| Normal | 0.0598 | 0.0172 | 0.4355 |
-| Student-t | 0.0326 | 0.0217 | 0.5273 |
-| FHS | 0.0527 | 0.0040 | 0.4425 |
-
-- Student-t mang tính bảo thủ cao (ít vi phạm).
-- FHS cho violation rate sát mục tiêu nhất.
+- **Moirai (Foundation Model)** được pre-train bằng các hàm MSE/MAE để tối ưu hóa giá trị kỳ vọng (mean).
+- Đặc tính của toán học MSE là "phạt" rất nặng các dự báo nằm xa trung bình. Do đó, mô hình có xu hướng **làm mượt (over-smooth)** các cú sốc biến động cực đoan.
+- Kết quả: Khi thị trường biến động mạnh, Moirai dự báo "quá an toàn" và đâm thủng ngưỡng rủi ro VaR liên tục *(Gneiting, 2011)*.
 
 ---
 
-## Hiệu quả đột phá của VaR-Aware Loss
+## Giải thích Học thuật (2): Độ nhạy cục bộ vs. Foundation
 
-- Ở ngưỡng VaR 5% (Normal và FHS), **Moirai_VAR** đã vươn lên vị trí **Top 1 toàn bảng** về Quantile Loss (Tổn thất phân vị).
-- Việc hi sinh một lượng nhỏ MSE để đạt độ chuẩn xác xuất sắc ở vùng rủi ro đuôi khẳng định sự thành công của thiết kế VaR-Aware Loss.
+Tại sao Transformer cục bộ có MSE kém nhưng VaR lại mạnh?
 
----
-
-## 3. Các Kiểm định Thống kê Bổ sung
-
-Để giải quyết yêu cầu của Reviewer 2, hệ thống kiểm định toàn diện đã được áp dụng:
-
-- **Friedman Test:** Khẳng định sự khác biệt giữa các mô hình về Point Forecast là có ý nghĩa cực kỳ cao (p-value < $1.62 \times 10^{-92}$).
-- **Nemenyi Test:** Xác nhận có hàng chục cặp mô hình (trên 80 cặp) có độ chênh lệch dự báo mang ý nghĩa thống kê.
+- Transformer có MSE cao do thiếu dữ liệu (chỉ nhìn 60 ngày), không học được xu hướng chuẩn xác.
+- **Tuy nhiên:** Do có cấu trúc tinh gọn (parsimonious), nhóm Tier 1 tránh được bẫy *over-parameterization* *(Zeng et al., 2023)*.
+- Nhờ hàm **Student-t động**, mô hình đạt được **độ nhạy cục bộ (local sensitivity)** cao. Tham số $\nu$ thích ứng linh hoạt, tạo ra dải rủi ro (coverage) phản ứng tức thời bao trọn vẹn các cú sốc đuôi hẹp *(Koenker, 1978)*.
+- **VaR Backtesting** không quan tâm sai số MSE, nó chỉ đếm số lần hụt. Coverage rộng = Tỷ lệ Pass cao *(Christoffersen, 1998)*.
 
 ---
 
-## Kiểm định Diebold-Mariano (DM)
+## Hiệu ứng Kích thước: Tier 1 vs. Tier 3
 
-**Số cặp mô hình khác biệt có ý nghĩa thống kê (DM Test trên Quantile Loss)**
+Tại sao Tier 1 (nhỏ gọn) lại đánh bại Tier 3 (hàng triệu tham số)?
+- **Over-parameterization:** Dữ liệu tài chính có signal-to-noise rất thấp. Mô hình lớn bị nhiễu loạn và suy thoái nghiệm *(Zeng et al., 2023)*.
+- **Bằng chứng Loss Curves (Autoformer - EuroNext 100):**
 
-| VaR case | Normal | Student-t | FHS |
-|---|---:|---:|---:|
-| 5% | 2,749 | 3,121 | 1,355 |
-| 1% | 3,589 | 2,928 | 1,264 |
-
-- **Kết luận DM Test:** Sự chênh lệch Quantile Loss giữa các mô hình là sâu sắc và có ý nghĩa thống kê, minh chứng cho sự thay thế Moirai-MoE-GARCHs bằng Moirai_VAR.
-
----
-
-## 4. Thảo luận: Sự phân ly của Accuracy & Risk
-
-Từ các bằng chứng thực nghiệm, em rút ra kết luận quan trọng:
-- Mô hình khớp *mean path* xuất sắc (Moirai) không tự động trở thành mô hình khớp *tail distribution* tốt (Transformer/Moirai_VAR).
-- Không thể dùng các độ đo truyền thống (MSE, MAE) làm tiêu chí độc tôn để chọn mô hình quản trị rủi ro tài chính.
+| Tier 1 (Hội tụ ổn định, bám sát) | Tier 3 (Bất ổn, dao động dữ dội) |
+| :---: | :---: |
+| ![Tier 1 Loss](file:///D:/UIT/1003_EPA_PROJECT/1.0.0/1003_EPA-Project_UIT/results_v2/tranformers%20based/results_v2/visualizations/Loss_Curves/Tier_1_Miniaturized/EuroNext_100_Autoformer_loss.png) | ![Tier 3 Loss](file:///D:/UIT/1003_EPA_PROJECT/1.0.0/1003_EPA-Project_UIT/results_v2/tranformers%20based/results_v2/visualizations/Loss_Curves/Tier_3_Large/EuroNext_100_Autoformer_loss.png) |
 
 ---
 
-## Đề xuất: Khung đánh giá hai tầng
-**(Two-Tier Evaluation Framework)**
+## Kiểm định Thống kê (Statistical Tests)
+
+Sự khác biệt cực độ trên không phải là ngẫu nhiên. Các kiểm định thống kê đã xác nhận (p-value < 0.05):
+- **Friedman Test:** Điểm số dự báo (MSE/MAE) giữa Moirai và Transformer có sự khác biệt mang ý nghĩa thống kê tuyệt đối.
+- **Diebold-Mariano Test:** Xác nhận có hàng ngàn cặp (vd: 3,589 cặp ở VaR 1%) có độ chênh lệch cực lớn về Quantile Loss.
+
+Điều này chứng minh nghịch lý Accuracy-Risk là một thực tế mang tính hệ thống.
+
+---
+
+## Đề xuất: Khung đánh giá hai tầng (Two-Tier)
+
+Để không "sập bẫy" khi ứng dụng Foundation Models, chúng tôi đề xuất:
 
 1. **Tier 1 (Đánh giá dự báo điểm):** 
-   - Dùng MSE, MAE, QLIKE. Phù hợp bài toán định giá (pricing).
-   - Đề xuất: Moirai.
+   - Tiêu chí: MSE, MAE.
+   - Ứng dụng: Bài toán định giá (Asset Pricing) - Nơi sự bám sát giá trị thực tế là tối quan trọng.
+   - **Lựa chọn tối ưu:** Moirai Foundation.
+
 2. **Tier 2 (Đánh giá rủi ro phân phối):** 
-   - Dùng VaR Backtesting, Quantile Loss. Phù hợp quản trị rủi ro.
-   - Đề xuất: Transformer Tiers hoặc Moirai_VAR (VaR-Aware Loss).
+   - Tiêu chí: VaR Backtesting, Quantile Loss.
+   - Ứng dụng: Quản trị rủi ro (Risk Management) - Nơi cần biên an toàn cao.
+   - **Lựa chọn tối ưu:** Transformer Cục bộ (Student-t).
 
 ---
 
-## Kết luận chung
+## Kết luận
 
-- Mọi góp ý của Reviewer đã được giải quyết triệt để thông qua quá trình cải tiến dữ liệu và phương pháp.
-- Sự ra đời của **Moirai_VAR** kết hợp tính ưu việt của foundation model và kỷ luật rủi ro (VaR-Aware) đã bổ sung hoàn hảo "Tính mới" cho nghiên cứu.
-- Bài báo hiện đã đủ dữ liệu và cơ sở thống kê vững chắc để sẵn sàng submit lại.
+- Bài nghiên cứu đã loại bỏ sự phụ thuộc vào một mô hình đề xuất yếu kém, chuyển hóa thành một **Khám phá Thực nghiệm (Empirical Discovery)** đắt giá.
+- Phát hiện ra **Nghịch lý Accuracy-Risk** là minh chứng rõ rệt cảnh tỉnh các nhà phân tích định lượng về việc lạm dụng Foundation Models.
+- Khung đánh giá hai tầng (Two-Tier Evaluation Framework) đóng vai trò kim chỉ nam vững chắc cho các nghiên cứu và ứng dụng thực tiễn trong tương lai.
 
 ---
 
 ## Cảm ơn mọi người đã lắng nghe!
 
-**Q&A**
+**Q & A**
 
 ---
 
 ## Tài liệu tham khảo (1/2)
 
-[1] T. Bollerslev, "Generalized autoregressive conditional heteroskedasticity," *Journal of Econometrics*, vol. 31, 1986.
-[2] L. R. Glosten et al., "On the relation between the expected value and the volatility... ," *The Journal of Finance*, vol. 48, 1993.
-[3] R. T. Baillie et al., "Fractionally integrated GARCH," *Journal of Econometrics*, vol. 74, 1996.
+[1] T. Bollerslev, "Generalized autoregressive conditional heteroskedasticity," *Journal of Econometrics*, 1986.
+[2] L. R. Glosten et al., "On the relation between the expected value and the volatility... ," *The Journal of Finance*, 1993.
+[3] R. T. Baillie et al., "Fractionally integrated GARCH," *Journal of Econometrics*, 1996.
 [4] A. Vaswani et al., "Attention is all you need," *NeurIPS*, 2017.
 [5] H. Zhou et al., "Informer: Beyond efficient transformer... ," *AAAI*, 2021.
 [6] H. Wu et al., "Autoformer: Decomposition transformers... ," *NeurIPS*, 2021.
@@ -247,3 +203,4 @@ Từ các bằng chứng thực nghiệm, em rút ra kết luận quan trọng:
 [14] P. Kupiec, "Techniques for verifying the accuracy of risk measurement models," *The Journal of Derivatives*, 1995.
 [15] F. X. Diebold & R. S. Mariano, "Comparing predictive accuracy," *JBES*, 1995.
 [16] C. Koenker & G. Bassett Jr, "Regression quantiles," *Econometrica*, 1978.
+[17] T. Gneiting, "Making and evaluating point forecasts," *J. Am. Stat. Assoc.*, 2011.
