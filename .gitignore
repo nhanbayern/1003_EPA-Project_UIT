@@ -24,6 +24,8 @@ notes.txt
 /results_v2
 
 # Generated analysis outputs
-/output/**/*.csv
 /output/**/*.png
 
+/output
+
+/output/merged_all_predictions.csv
