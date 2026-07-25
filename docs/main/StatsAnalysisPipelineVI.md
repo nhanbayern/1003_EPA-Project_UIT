@@ -388,7 +388,7 @@ volatility_std_ratio_error <= 0.9
 tracking_correlation > 0
 ```
 
-Model không qua gate sẽ được ghi vào `excluded_models.csv` và không được xếp hạng MCDM.
+Model không qua gate sẽ được ghi vào `ExcludedModels.csv` và không được xếp hạng MCDM.
 
 Trọng số cụ thể:
 
@@ -404,22 +404,24 @@ Trọng số cụ thể:
 | `var_5pct_pass_rate` | benefit | 0.125 | 0.175 |
 | `var_5pct_abs_violation_error` | cost | 0.125 | 0.175 |
 
-Output được lưu theo timestamp để không ghi đè lần chạy cũ:
+Output được lưu theo timestamp để không ghi đè lần chạy cũ. Riêng MCDM dùng quy ước tên deliverable dạng PascalCase, không dùng snake_case cho file ảnh, báo cáo hoặc file xuất chính của MCDM:
 
 ```text
-output/mcdm_results/mcdm_YYYYMMDD_HHMMSS/5,5/
-output/mcdm_results/mcdm_YYYYMMDD_HHMMSS/3,7/
+output/mcdm_results/MCDMYYYYMMDDHHMMSS/5,5/
+output/mcdm_results/MCDMYYYYMMDDHHMMSS/3,7/
 ```
 
 Trong mỗi folder có các file CSV:
 
 ```text
-criteria_weights.csv
-mcdm_input_metrics.csv
-excluded_models.csv
-saw_ranking.csv
-topsis_ranking.csv
-combined_mcdm_ranking.csv
+CriteriaWeights.csv
+MCDMInputMetrics.csv
+ExcludedModels.csv
+SAWRanking.csv
+TOPSISRanking.csv
+CombinedMCDMRanking.csv
+GARCHAutoformerDominanceSummary.csv
+GARCHAutoformerPairwiseDominance.csv
 ```
 
 Các CSV ranking vẫn giữ chi tiết theo `branch/tier/model`, đồng thời có thêm:
@@ -427,19 +429,23 @@ Các CSV ranking vẫn giữ chi tiết theo `branch/tier/model`, đồng thời
 ```text
 display_name: tên sạch có tier, ví dụ GARCH-Autoformer (Tier 2)
 display_group: tên sạch không tier, ví dụ GARCH-Autoformer
+display_model_tier: tên compact cho hình và báo cáo, ví dụ AutoformerTier3
 ```
 
 Riêng các ảnh phân tích được tổng hợp theo `display_group`, tức lấy trung bình qua các tier trước khi vẽ. Cách này tránh biểu đồ bị rối bởi nhiều dòng `Tier_1`, `Tier_2`, `Tier_3`, trong khi CSV vẫn giữ đủ chi tiết để audit.
 
+Riêng ảnh `VolatilityStdRatioErrorByModelTier.png` được vẽ theo từng model-tier, không aggregate theo family. Tên model trên trục y dùng quy ước compact PascalCase như `AutoformerTier3`, `GARCHAutoformerTier2`, hoặc `MoiraiVaRMoirai2Lambda02` để tránh snake_case và dễ đọc khi đưa vào báo cáo.
+
 Và các ảnh phân tích:
 
 ```text
-criteria_weights.png
-saw_top_models.png
-topsis_top_models.png
-accuracy_risk_tradeoff.png
-saw_topsis_rank_comparison.png
-volatility_dynamics_penalty.png
+CriteriaWeights.png
+SAWTopModels.png
+TOPSISTopModels.png
+AccuracyRiskTradeoff.png
+SAWTOPSISRankComparison.png
+VolatilityDynamicsPenalty.png
+VolatilityStdRatioErrorByModelTier.png
 ```
 
 ## 4. Ý nghĩa các output của `stats_analysis`

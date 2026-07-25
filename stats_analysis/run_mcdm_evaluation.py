@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+import re
 import sys
 
 import matplotlib
@@ -179,6 +180,30 @@ def display_model_name(branch: object, tier: object, model: object, *, include_t
     return base
 
 
+def _pascal_token(value: str) -> str:
+    words = re.findall(r"[A-Za-z0-9]+", value)
+    return "".join(word[:1].upper() + word[1:] for word in words)
+
+
+def compact_model_tier_name(branch: object, tier: object, model: object) -> str:
+    base = display_model_name(branch, tier, model, include_tier=False)
+    tier_text = _clean_tier(tier)
+    label = _pascal_token(base)
+    if not tier_text:
+        return label
+
+    tier_match = re.search(r"Tier[_\s-]*(\d+)", tier_text, flags=re.IGNORECASE)
+    if tier_match:
+        return f"{label}Tier{tier_match.group(1)}"
+
+    lambda_match = re.search(r"lambda[_\s=-]*(\d+(?:\.\d+)?)", tier_text, flags=re.IGNORECASE)
+    if lambda_match:
+        lambda_value = lambda_match.group(1).replace(".", "")
+        return f"{label}Lambda{lambda_value}"
+
+    return f"{label}{_pascal_token(tier_text)}"
+
+
 def add_display_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["display_name"] = [
@@ -187,6 +212,10 @@ def add_display_columns(df: pd.DataFrame) -> pd.DataFrame:
     ]
     out["display_group"] = [
         display_model_name(row.branch, row.tier, row.model, include_tier=False)
+        for row in out.itertuples(index=False)
+    ]
+    out["display_model_tier"] = [
+        compact_model_tier_name(row.branch, row.tier, row.model)
         for row in out.itertuples(index=False)
     ]
     return out
@@ -524,7 +553,7 @@ def aggregate_for_plots(df: pd.DataFrame, *, rank_columns: tuple[str, ...] = ())
     numeric_cols = [
         col
         for col in df.columns
-        if col not in {"branch", "tier", "model", "model_id", "display_name", "display_group"}
+        if col not in {"branch", "tier", "model", "model_id", "display_name", "display_group", "display_model_tier"}
         and pd.api.types.is_numeric_dtype(pd.to_numeric(df[col], errors="coerce"))
     ]
     agg_spec = {col: (col, "mean") for col in numeric_cols}
@@ -752,6 +781,69 @@ def save_tracking_penalty_plot(matrix: pd.DataFrame, combined: pd.DataFrame, out
     plt.close(fig)
 
 
+def save_std_ratio_error_by_model_tier_plot(matrix: pd.DataFrame, output_path: Path) -> None:
+    plot_df = matrix.copy()
+    plot_df["volatility_std_ratio_error"] = pd.to_numeric(
+        plot_df["volatility_std_ratio_error"],
+        errors="coerce",
+    )
+    plot_df = plot_df.dropna(subset=["volatility_std_ratio_error"]).sort_values(
+        "volatility_std_ratio_error",
+        ascending=True,
+    )
+    colors = model_color_map(plot_df["display_group"])
+    bar_colors = plot_df["display_group"].map(colors)
+    labels = plot_df["display_model_tier"].map(lambda value: short_label(value, max_length=36))
+    y = np.arange(len(plot_df))
+
+    fig, ax = plt.subplots(figsize=(14, max(6.5, 0.32 * len(plot_df))))
+    ax.barh(y, plot_df["volatility_std_ratio_error"], color=bar_colors, alpha=0.92)
+    ax.axvline(
+        MAX_STD_RATIO_ERROR_FOR_ELIGIBILITY,
+        color="#b3261e",
+        linestyle="--",
+        linewidth=1.8,
+        label=f"Eligibility Threshold = {MAX_STD_RATIO_ERROR_FOR_ELIGIBILITY:g}",
+    )
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels)
+    ax.set_title("Volatility Std Ratio Error by Model Tier")
+    ax.set_xlabel("Volatility Std Ratio Error (Lower Is Better)")
+    ax.grid(axis="x", alpha=0.25)
+
+    threshold_handle = Line2D(
+        [0],
+        [0],
+        color="#b3261e",
+        linestyle="--",
+        linewidth=1.8,
+        label=f"Threshold = {MAX_STD_RATIO_ERROR_FOR_ELIGIBILITY:g}",
+    )
+    model_handles = [Patch(facecolor=color, edgecolor="none", label=label) for label, color in colors.items()]
+    first_legend = ax.legend(
+        handles=[threshold_handle],
+        title="Sanity Gate",
+        loc="upper left",
+        bbox_to_anchor=(1.01, 1.0),
+        frameon=True,
+        fontsize=8,
+        title_fontsize=9,
+    )
+    ax.add_artist(first_legend)
+    ax.legend(
+        handles=model_handles,
+        title="Model Family",
+        loc="center left",
+        bbox_to_anchor=(1.01, 0.45),
+        frameon=True,
+        fontsize=8,
+        title_fontsize=9,
+    )
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
 def garch_autoformer_dominance(combined: pd.DataFrame, scenario: McdmScenario) -> tuple[pd.DataFrame, pd.DataFrame]:
     grouped = aggregate_for_plots(combined, rank_columns=("avg_mcdm_rank",))
     baseline_rows = grouped[grouped["display_group"].eq("GARCH-Autoformer")]
@@ -864,19 +956,20 @@ def save_analysis_plots(
         score_column="saw_score",
         rank_column="saw_rank",
         title=f"Top Models by SAW Composite Score ({scenario.label})",
-        output_path=output_dir / "saw_top_models.png",
+        output_path=output_dir / "SAWTopModels.png",
     )
     save_bar_plot(
         topsis,
         score_column="topsis_score",
         rank_column="topsis_rank",
         title=f"Top Models by TOPSIS Closeness Coefficient ({scenario.label})",
-        output_path=output_dir / "topsis_top_models.png",
+        output_path=output_dir / "TOPSISTopModels.png",
     )
-    save_accuracy_risk_plot(saw, combined, output_dir / "accuracy_risk_tradeoff.png")
-    save_weight_plot(scenario.criteria, output_dir / "criteria_weights.png")
-    save_rank_comparison_plot(combined, output_dir / "saw_topsis_rank_comparison.png")
-    save_tracking_penalty_plot(matrix, combined, output_dir / "volatility_dynamics_penalty.png")
+    save_accuracy_risk_plot(saw, combined, output_dir / "AccuracyRiskTradeoff.png")
+    save_weight_plot(scenario.criteria, output_dir / "CriteriaWeights.png")
+    save_rank_comparison_plot(combined, output_dir / "SAWTOPSISRankComparison.png")
+    save_tracking_penalty_plot(matrix, combined, output_dir / "VolatilityDynamicsPenalty.png")
+    save_std_ratio_error_by_model_tier_plot(matrix, output_dir / "VolatilityStdRatioErrorByModelTier.png")
 
 
 def run_scenario(matrix: pd.DataFrame, scenario: McdmScenario, output_dir: Path) -> None:
@@ -893,14 +986,14 @@ def run_scenario(matrix: pd.DataFrame, scenario: McdmScenario, output_dir: Path)
     garch_dominance_summary, garch_dominance_pairwise = garch_autoformer_dominance(combined, scenario)
 
     outputs = {
-        "criteria_weights.csv": criteria_frame(scenario),
-        "mcdm_input_metrics.csv": matrix,
-        "excluded_models.csv": excluded,
-        "saw_ranking.csv": saw,
-        "topsis_ranking.csv": topsis,
-        "combined_mcdm_ranking.csv": combined,
-        "garch_autoformer_dominance_summary.csv": garch_dominance_summary,
-        "garch_autoformer_pairwise_dominance.csv": garch_dominance_pairwise,
+        "CriteriaWeights.csv": criteria_frame(scenario),
+        "MCDMInputMetrics.csv": matrix,
+        "ExcludedModels.csv": excluded,
+        "SAWRanking.csv": saw,
+        "TOPSISRanking.csv": topsis,
+        "CombinedMCDMRanking.csv": combined,
+        "GARCHAutoformerDominanceSummary.csv": garch_dominance_summary,
+        "GARCHAutoformerPairwiseDominance.csv": garch_dominance_pairwise,
     }
     for filename, frame in outputs.items():
         path = output_dir / filename
@@ -916,8 +1009,8 @@ def main() -> None:
         validate_weights(scenario.criteria)
 
     stats_root = PROJECT_ROOT / "output" / "stats_analysis"
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_root = PROJECT_ROOT / "output" / "mcdm_results" / f"mcdm_{timestamp}"
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    run_root = PROJECT_ROOT / "output" / "mcdm_results" / f"MCDM{timestamp}"
     run_root.mkdir(parents=True, exist_ok=True)
 
     matrix = build_decision_matrix(stats_root)

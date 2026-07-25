@@ -18,7 +18,7 @@ stats_analysis/run_mcdm_evaluation.py
 Output liên quan:
 
 ```text
-output/mcdm_results/mcdm_YYYYMMDD_HHMMSS/
+output/mcdm_results/MCDMYYYYMMDDHHMMSS/
 ```
 
 ## 1. Mục tiêu đánh giá
@@ -201,16 +201,24 @@ tracking_correlation > 0
 Nếu mô hình không qua gate này, nó bị ghi vào:
 
 ```text
-excluded_models.csv
+ExcludedModels.csv
 ```
 
 và không được xếp hạng trong:
 
 ```text
-saw_ranking.csv
-topsis_ranking.csv
-combined_mcdm_ranking.csv
+SAWRanking.csv
+TOPSISRanking.csv
+CombinedMCDMRanking.csv
 ```
+
+Pipeline cũng xuất thêm ảnh:
+
+```text
+VolatilityStdRatioErrorByModelTier.png
+```
+
+Ảnh này vẽ `volatility_std_ratio_error` cho từng model-tier thay vì gộp theo model family. Tên model-tier dùng convention compact PascalCase, ví dụ `AutoformerTier3`, để tránh snake_case trong deliverables hình ảnh và thuận tiện khi đưa vào báo cáo.
 
 Lý do khoa học:
 

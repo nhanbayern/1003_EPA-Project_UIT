@@ -10,7 +10,7 @@
 Tài liệu này tổng hợp kết quả từ lần chạy MCDM mới nhất:
 
 ```text
-output/mcdm_results/mcdm_20260725_170414/
+output/mcdm_results/MCDM20260725170414/
 ```
 
 Script liên quan:
