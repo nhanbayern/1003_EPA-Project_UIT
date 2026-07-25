@@ -19,6 +19,18 @@ notes.txt
 /.github/prompts
 
 # Large weights and data
+/weights/
+weights/
+*.zip
+*.csv
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.hdf5
+*.onnx
+*.safetensors
+*.bin
 /model/Morai based/weights
 /model/Morai based/weights.zip
 /results_v2
