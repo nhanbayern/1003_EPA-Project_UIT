@@ -6,7 +6,7 @@ Tài liệu này chú thích luồng xử lý của module `stats_analysis`, t�
 
 ```mermaid
 flowchart TD
-    A["output/merged_all_predictions.csv<br/>Prediction CSV đã merge"]
+    A["output/merged_predictions/merged_all_predictions_<timestamp>.csv<br/>Prediction CSV đã merge"]
     B["stats_analysis/run_full_var_analysis.py<br/>Chạy VaR 5% và VaR 1%"]
     C["output/stats_analysis/var_5pct/<br/>Kết quả VaR 5%"]
     D["output/stats_analysis/var_1pct/<br/>Kết quả VaR 1%"]
@@ -32,15 +32,17 @@ flowchart TD
     I --> J
 ```
 
-Pipeline này không train lại model. Nó chỉ đọc các forecast đã có sẵn trong `merged_all_predictions.csv`, tính forecast metrics, tính VaR, backtest violation, tổng hợp ranking và tạo các bảng phục vụ paper.
+Pipeline này không train lại model. Nó chỉ đọc các forecast đã có sẵn trong `output/merged_predictions/merged_all_predictions_<timestamp>.csv`, tính forecast metrics, tính VaR, backtest violation, tổng hợp ranking và tạo các bảng phục vụ paper. Trong đó `<timestamp>` là nhãn của file CSV muốn chạy.
 
 ## 2. Input chính
 
-Input mặc định của `StatsAnalysisPipeline` là:
+Input khuyến nghị của pipeline là:
 
 ```text
-output/merged_all_predictions.csv
+output/merged_predictions/merged_all_predictions_<timestamp>.csv
 ```
+
+Trong đó `<timestamp>` là nhãn thời gian hoặc mã phiên bản của file CSV muốn chạy. Nếu không truyền `--input-csv`, `run_full_var_analysis.py` sẽ tự chọn file mới nhất khớp pattern `output/merged_predictions/merged_all_predictions*.csv`, rồi mới fallback về `output/merged_all_predictions.csv`.
 
 File này cần có các cột bắt buộc:
 
@@ -73,7 +75,7 @@ File cấu hình runtime cho pipeline.
 Vai trò:
 
 ```text
-- Định nghĩa input mặc định: output/merged_all_predictions.csv
+- Định nghĩa input legacy mặc định: output/merged_all_predictions.csv
 - Định nghĩa output directory mặc định: output/stats_analysis/
 - Định nghĩa alpha, pvalue_threshold, epsilon, min_history
 - Định nghĩa tên các file output
@@ -96,7 +98,7 @@ File đọc và validate input prediction CSV.
 Vai trò:
 
 ```text
-- Đọc output/merged_all_predictions.csv
+- Đọc file CSV được truyền từ `--input-csv` hoặc file mới nhất trong `output/merged_predictions/`
 - Kiểm tra đủ các cột bắt buộc
 - Parse cột time sang datetime
 - Chuẩn hóa tier và horizon
@@ -596,19 +598,22 @@ abs_violation_error: đo violation_rate lệch alpha bao nhiêu về độ lớn
 
 ## 6. Thứ tự chạy để tái tạo kết quả
 
-Nếu đã có `output/merged_all_predictions.csv`, chạy:
+Thay `<timestamp>` bằng nhãn của file CSV muốn chạy, ví dụ `24_7` hoặc `20260725_170414`:
 
 ```powershell
-python stats_analysis\run_full_var_analysis.py
+$csv = "output\merged_predictions\merged_all_predictions_<timestamp>.csv"
+
+python stats_analysis\run_full_var_analysis.py --input-csv $csv
 python stats_analysis\run_statistical_tests.py
 python stats_analysis\build_research_summary.py
+python stats_analysis\check_volatility_stationarity.py --input-csv $csv
 python stats_analysis\run_mcdm_evaluation.py
 ```
 
 Nếu chỉ cần tạo `stats_by_model.csv` cho MCDM, chỉ cần chạy:
 
 ```powershell
-python stats_analysis\run_full_var_analysis.py
+python stats_analysis\run_full_var_analysis.py --input-csv "output\merged_predictions\merged_all_predictions_<timestamp>.csv"
 ```
 
 Sau đó MCDM có thể đọc:
