@@ -56,8 +56,18 @@ def run_training_to_zip(
         val_loader = DataLoader(val_ds, batch_size=batch_size * 2, shuffle=False)
         test_loader = DataLoader(test_ds, batch_size=batch_size * 2, shuffle=False)
 
+        import numpy as np
+        from scipy.stats import kurtosis
+        train_returns = np.array([train_ds.dataset.samples[i]["log_return"] for i in train_ds.indices])
+        k = kurtosis(train_returns, fisher=True, nan_policy='omit')
+        if k <= 0:
+            dynamic_nu = 30.0
+        else:
+            dynamic_nu = float(np.clip(4.0 + 6.0 / k, 2.1, 30.0))
+        print(f"[{index_name}] Kurtosis: {k:.4f} | Calculated Dynamic nu: {dynamic_nu:.4f}")
+
         for model_type in selected_models:
-            print(f"=== {index_name} | {model_type} | lambda_var={lambda_var} | tuning_mode={tuning_mode} ===")
+            print(f"=== {index_name} | {model_type} | lambda_var={lambda_var} | tuning_mode={tuning_mode} | nu={dynamic_nu:.4f} ===")
             extractor = VolatilityFeatureExtractor(
                 model_type=model_type,
                 size="small",
@@ -77,7 +87,7 @@ def run_training_to_zip(
                 alpha=0.01,
                 lambda_var=lambda_var,
                 distribution="student_t",
-                nu=4.0,
+                nu=dynamic_nu,
                 var_horizon_index=0,
                 tuning_mode=tuning_mode,
             )

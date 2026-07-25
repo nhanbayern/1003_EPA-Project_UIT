@@ -86,10 +86,10 @@ def build_accuracy_risk_tradeoff(stats_root: Path) -> pd.DataFrame:
         df = pd.read_csv(stats_root / var_case / "stats_by_model.csv")
         df.insert(0, "var_case", var_case)
         df["model_id"] = model_id_frame(df)
-        df["qlike_rank"] = df["qlike"].rank(method="min", ascending=True).astype(int)
-        df["mse_rank"] = df["mse"].rank(method="min", ascending=True).astype(int)
-        df["mae_rank"] = df["mae"].rank(method="min", ascending=True).astype(int)
-        df["pass_rate_rank"] = df["pass_rate"].rank(method="min", ascending=False).astype(int)
+        df["qlike_rank"] = df["qlike"].rank(method="min", ascending=True).astype("Int64")
+        df["mse_rank"] = df["mse"].rank(method="min", ascending=True).astype("Int64")
+        df["mae_rank"] = df["mae"].rank(method="min", ascending=True).astype("Int64")
+        df["pass_rate_rank"] = df["pass_rate"].rank(method="min", ascending=False).astype("Int64")
         df["risk_accuracy_gap"] = df["pass_rate_rank"] - df["qlike_rank"]
         rows.extend(df.to_dict("records"))
     cols = [

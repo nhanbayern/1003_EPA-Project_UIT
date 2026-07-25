@@ -36,6 +36,8 @@ weights/
 /results_v2
 
 # Generated analysis outputs
-/output/**/*.csv
 /output/**/*.png
 
+/output
+
+/slide
