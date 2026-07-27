@@ -1,6 +1,6 @@
-# Bố Cục Báo Cáo: GARCH-Autoformer + Sanity Gate + MCDM Dynamic Tracking
+# Bố Cục Báo Cáo (26/7/2026): Các Đề Xuất Kiến Trúc + Sanity Gate + MCDM
 
-> **Luồng tư duy:** Vấn đề & Research Gap → Cơ sở lý thuyết giải thích vấn đề → Đề xuất của chúng tôi → Cơ sở thiết kế đề xuất → Kết quả & Phân tích → Kết luận
+> **Luồng tư duy:** Vấn đề & Research Gap → Cơ sở lý thuyết → **Các đề xuất của chúng tôi (với sơ đồ kiến trúc)** → Cơ sở thiết kế → Kết quả & Phân tích → Kết luận
 
 ---
 
@@ -8,297 +8,436 @@
 
 ### 1.1 Bối cảnh và Động lực nghiên cứu
 
-Dự báo volatility là nền tảng của quản trị rủi ro tài chính (VaR, capital allocation, portfolio management). Tuy nhiên, trong thực tiễn nghiên cứu, **hai thế giới này vẫn bị đánh giá tách rời nhau:**
+Dự báo volatility là nền tảng của quản trị rủi ro tài chính (VaR, capital allocation, portfolio management). Trong thực tiễn nghiên cứu, **hai mục tiêu này vẫn bị đánh giá tách rời:**
+- **Forecasting accuracy:** Tối ưu MSE, MAE, QLIKE.
+- **Risk management:** Tối ưu VaR backtesting (Kupiec + Christoffersen).
 
-- **Góc nhìn forecasting:** Tối ưu MSE, MAE, QLIKE — tức là mô hình nào dự báo gần true volatility nhất.
-- **Góc nhìn risk management:** Tối ưu VaR backtesting (Kupiec + Christoffersen) — tức là mô hình nào tạo ra tail-risk signal đúng nhất.
+Kết quả thực nghiệm (9 chỉ số, 5 horizon, 16+ mô hình) xác nhận: **Moirai-family dẫn đầu MSE/MAE/QLIKE nhưng không dẫn đầu VaR calibration** — đây là bằng chứng mạnh cho sự tách biệt của hai mục tiêu.
 
-Nghiên cứu thực nghiệm trong dự án này (9 chỉ số, 5 horizon, 10+ model family) xác nhận: **mô hình dự báo tốt nhất về MSE/MAE không phải là mô hình có risk calibration tốt nhất** — đây là thực tế đã được ghi nhận bởi Christoffersen & Diebold (2000), nhưng chưa được giải quyết triệt để trong pipeline đánh giá model.
-
-> **Trích dẫn cần có:** Christoffersen & Diebold (2000); Patton (2011); Bollerslev (1986); Zhao et al. (2024) [GARCH-LSTM]; Liu et al. (2025) [Moirai-MoE].
+> **Trích dẫn:** Christoffersen & Diebold (2000); Patton (2011); Bollerslev (1986); Zhao et al., AAAI (2024); Liu et al., ICML (2025).
 
 ---
 
-### 1.2 Research Gap — Hai lỗ hổng chưa được giải quyết trong literature
+### 1.2 Research Gap — Ba lỗ hổng chưa được giải quyết
 
 #### Gap 1 — Không có cơ chế phát hiện forecast suy biến trước khi xếp hạng
 
-Khi đánh giá nhiều mô hình trong pipeline MCDM, các công trình hiện tại thường dùng trực tiếp MSE/MAE/QLIKE và VaR metrics để xếp hạng, **mà không kiểm tra liệu forecast có thực sự tracking được dynamics của chuỗi hay không.**
+Các pipeline MCDM hiện tại đưa trực tiếp MSE/MAE/QLIKE và VaR metrics vào ranking **mà không kiểm tra liệu forecast có tracking được dynamics hay không.** Kết quả thực nghiệm: Informer Tier 3 và Reformer Tier 3 có `std(predict)/std(true) ≈ 0` và `tracking_correlation ≤ 0` — forecast phẳng hoàn toàn — nhưng vẫn có VaR violation rate tình cờ gần alpha → pass backtesting.
 
-Kết quả thực nghiệm trong dự án này cho thấy một số Transformer tier lớn (Informer Tier 3, Reformer Tier 3, Vanilla Tier 3) tạo forecast gần như đường phẳng trong từng `dataset×horizon`:
-- `std(predict) / std(true) ≈ 0` → không có biến động dự báo.
-- `corr(predict, true) ≤ 0` → không có tương quan dương với true volatility.
+> **Trích dẫn:** Gneiting et al. (2007) — sharpness; Gneiting (2011) — scoring function mismatch; Kosma et al. (2022) — degenerate neural TS solutions; Patton & Sheppard (2009); DTCenter METplus.
 
-Dù vậy, chúng vẫn có thể đạt **VaR violation rate ngẫu nhiên gần alpha** → tình cờ pass backtesting → được xếp vào ranking MCDM như thể là mô hình hợp lệ.
+#### Gap 2 — Thiếu framework MCDM tích hợp dynamic tracking và risk calibration
 
-**Lỗ hổng:** Literature chưa có cơ chế *screening trước ranking* để loại các forecast suy biến dạng này.
+Các nghiên cứu model selection hiện tại hoặc chỉ dùng forecast accuracy, hoặc chỉ dùng VaR backtesting — **không có công trình nào kết hợp Sanity Gate với MCDM risk-sensitive selection** thành một pipeline nhất quán bao gồm cả metric động học.
 
-> **Trích dẫn cần có:**
-> - Gneiting et al. (2007) — forecast tốt phải calibrated *và* sharp; một forecast không thay đổi vi phạm nguyên tắc sharpness.
-> - Gneiting (2011) — scoring function không matched với forecast task dẫn đến kết luận sai về chất lượng mô hình.
-> - Kosma et al. (2022) — neural time-series models có xu hướng "copy the past" và rơi vào nghiệm suy biến dưới MSE/MAE loss.
-> - Patton & Sheppard (2009) — diagnostic evaluation cho volatility forecasts phải đo cả magnitude lẫn relationship.
-> - DTCenter METplus — verification cho continuous forecasts đòi hỏi đo cả accuracy và correlation.
+> **Trích dẫn:** Hwang & Yoon (1981); Kupiec (1995); Christoffersen (1998); Patton (2011).
 
-#### Gap 2 — Thiếu framework MCDM tích hợp dynamic tracking và risk calibration đồng thời
+#### Gap 3 — Foundation Models chưa được fine-tune với VaR-aware objective cho volatility
 
-Các nghiên cứu hiện tại về model selection cho volatility forecasting thường:
-- **Chỉ dùng forecast accuracy** (MSE, MAE, QLIKE) để xếp hạng → bỏ qua risk calibration.
-- **Hoặc chỉ dùng VaR backtesting** → bỏ qua khả năng tracking dynamics.
-- Một số ít dùng MCDM (SAW, TOPSIS) nhưng **không bao gồm metric động học** — không phạt forecast phẳng.
+Foundation time-series models (Moirai) được fine-tune bằng MSE thuần túy. Câu hỏi quan trọng là: **liệu việc nhúng VaR-aware loss trực tiếp vào training objective có cải thiện đồng thời forecast accuracy và tail-risk calibration không?** — câu hỏi này chưa được khám phá có hệ thống.
 
-Đặc biệt: **không có công trình nào kết hợp forecast sanity gate (loại mô hình không tracking) với MCDM risk-sensitive selection** thành một pipeline nhất quán.
-
-> **Trích dẫn cần có:**
-> - Hwang & Yoon (1981) [TOPSIS] — phương pháp MCDM gốc.
-> - Kupiec (1995) — VaR coverage test.
-> - Christoffersen (1998) — VaR independence test.
-> - Patton (2011) — MSE và QLIKE phù hợp đánh giá volatility nhưng không đủ để phát hiện flat forecast.
+> **Trích dẫn:** Liu et al., ICML (2025) [Moirai-MoE]; Praetz (1972); Bollerslev (1987); Christoffersen (1998).
 
 ---
 
 ## 2. CƠ SỞ LÝ THUYẾT — TẠI SAO FORECAST PHẲNG XẢY RA?
 
-### 2.1 Tính chất Mean Reversion của chuỗi Volatility tài chính
+### 2.1 Mean Reversion của chuỗi Volatility tài chính
 
-Volatility tài chính có tính **mean-reverting**: sau các cú sốc, volatility có xu hướng trở về mức trung bình dài hạn (long-run mean). Đây là nền tảng lý thuyết của GARCH và các mô hình variance có điều kiện.
+Volatility có tính **mean-reverting**: sau shock, quay về long-run mean. Được mã hóa trong GARCH bởi `α + β < 1` (Bollerslev, 1986). Đặc tính này khiến predict hằng số gần μ cho MSE thấp mà không cần học dynamics.
 
-- **Volatility clustering** (Mandelbrot, 1963): giai đoạn volatility cao theo sau giai đoạn cao, thấp theo thấp — nhưng không tăng/giảm mãi mãi.
-- **Mean reversion** trong GARCH được mã hóa bởi hệ số persistence `α + β < 1` (Bollerslev, 1986).
-- Đặc tính này làm cho chuỗi volatility *trông có vẻ dự báo được* bằng một hằng số xấp xỉ long-run mean.
+> **Trích dẫn:** Bollerslev (1986); Engle (1982); Baillie et al. (1996); Mandelbrot (1963).
 
-> **Trích dẫn cần có:** Bollerslev (1986); Engle (1982); Baillie et al. (1996) [FI-GARCH]; Mandelbrot (1963).
+### 2.2 Mean Reversion ≠ Stationarity — Kiểm định thực nghiệm
 
----
-
-### 2.2 Mean Reversion ≠ Stationarity — Kiểm định thực nghiệm trên dataset
-
-> ⚠️ **Điểm cốt lõi:** Đây là phần bạn đã kiểm định, cần trình bày bằng chứng thực nghiệm.
-
-**Phương pháp:** ADF test (H0: unit root) + KPSS test (H0: stationary). Kết luận `stationary` chỉ khi **cả hai** thỏa: ADF p < 0.05 **và** KPSS p ≥ 0.05. Nhãn `mixed` khi hai test cho kết luận trái chiều.
-
-**Kết quả tổng quát (45 chuỗi `dataset × horizon`):**
+**Phương pháp:** ADF + KPSS. Kết luận `stationary` chỉ khi ADF p < 0.05 VÀ KPSS p ≥ 0.05.
 
 | Split | Stationary | Mixed | Non-stationary |
 |-------|-----------|-------|----------------|
-| **Full** | **15** (33.3%) | **30** | 0 |
+| Full | 15 (33.3%) | 30 | 0 |
 | Train | 9 | 30 | 6 |
 | **Val** | **0** | 22 | **23** |
 | **Test** | **1** | 18 | **26** |
 
-**Diễn giải khoa học:**
-- Trên full sample, 30/45 chuỗi là `mixed` — ADF không bác bỏ mean-reverting behavior nhưng KPSS vẫn phát hiện local non-stationarity.
-- **Val/Test có nhiều non-stationary hơn hẳn train** → trong giai đoạn đánh giá, chuỗi thường trải qua regime shift và volatility clustering cục bộ.
-- Điều này có nghĩa: mô hình học được mean path trong train **không thể giả định cùng phân phối trong test**.
+**Kết luận:** Test split có 26/45 chuỗi non-stationary — trong giai đoạn đánh giá, chuỗi trải qua regime shift. Mô hình học mean path trong train → khi gặp regime shift → forecast phẳng.
 
-> **Trích dẫn cần có:** Dickey & Fuller (1979) [ADF]; Kwiatkowski et al. (1992) [KPSS]; Perron (1989) — structural break ảnh hưởng đến unit root tests; Hamilton (1994) — Time Series Analysis, chương kiểm định tính dừng.
+> **Trích dẫn:** Dickey & Fuller (1979); Kwiatkowski et al. (1992); Perron (1989); Hamilton (1994).
 
----
+### 2.3 Tại sao Transformer bị flat forecast?
 
-### 2.3 Tại sao mô hình học thống kê bị "flat forecast"?
+Transformer với 60-ngày context trên chuỗi noise cao:
+- Học được mean path trong train.
+- Gặp regime shift trong test → "quay về trung bình" → đường phẳng.
+- **Thực nghiệm:** Informer Tier 3: `std_ratio_error = 1.000`, `tracking_corr_error = 0.985`.
 
-Với chuỗi volatility có tính mean-reverting, **tối ưu MSE về mặt lý thuyết có thể ra nghiệm hằng số** (conditional mean của chuỗi) nếu signal-to-noise ratio thấp hoặc mô hình không có đủ inductive bias để phân biệt giai đoạn high/low volatility.
-
-Transformer (Autoformer, Informer, Reformer) với cửa sổ đầu vào chỉ 60 ngày trên chuỗi noise cao:
-- Học được *mean path* trong tập train (nơi volatility tương đối ổn định hơn).
-- Khi gặp regime shift trong test → áp dụng cùng "chiến lược quay về trung bình" → forecast là đường phẳng quanh long-run mean.
-- **Kết quả thực nghiệm:** Informer Tier 3 có `std_ratio_error = 1.000`, `tracking_correlation_error = 0.985` — forecast gần như không biến động dù true volatility có những đột biến lớn.
-
-> **Trích dẫn cần có:**
-> - Chen et al. (ICML 2025) — Transformer mạnh nhất khi data có long-range structure; high noise/short sequences giảm lợi thế của attention.
-> - Zeng et al. (AAAI 2023) — "Are transformers effective for time series forecasting?" — thách thức về tính hiệu quả của Transformer trong nhiều bài toán TS.
-> - Lim & Zohren (2021) — survey deep learning for time-series, data hunger của Transformer.
-> - Kosma et al. (2022) — degenerate solutions trong neural TS forecasting.
+> **Trích dẫn:** Chen et al., ICML (2025); Zeng et al., AAAI (2023); Lim & Zohren (2021); Kosma et al. (2022).
 
 ---
 
 ## 3. ĐỀ XUẤT CỦA CHÚNG TÔI
 
-Ba đóng góp chính được đề xuất để giải quyết hai Gap nêu trên:
+Bốn đóng góp chính giải quyết ba Gap:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  ĐỀ XUẤT 1: GARCH-Autoformer (Kiến trúc Hybrid Residual)       │
-│  → Giải quyết trade-off accuracy vs risk calibration           │
-├─────────────────────────────────────────────────────────────────┤
-│  ĐỀ XUẤT 2: Forecast Sanity Gate                               │
-│  → Giải quyết Gap 1: phát hiện forecast suy biến              │
-├─────────────────────────────────────────────────────────────────┤
-│  ĐỀ XUẤT 3: MCDM Risk-Sensitive với Dynamic Tracking Metrics   │
-│  → Giải quyết Gap 2: xếp hạng đa tiêu chí toàn diện           │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│  ĐỀ XUẤT 1: GARCH-Autoformer (Residual Correction Hybrid)          │
+│  → Giải quyết trade-off accuracy vs risk ở cấp kiến trúc model     │
+├──────────────────────────────────────────────────────────────────────┤
+│  ĐỀ XUẤT 2: MoiraiVaR (VaR-Aware Foundation Model Fine-tuning)     │
+│  → Giải quyết Gap 3: nhúng VaR-aware objective vào foundation model │
+├──────────────────────────────────────────────────────────────────────┤
+│  ĐỀ XUẤT 3: Forecast Sanity Gate                                    │
+│  → Giải quyết Gap 1: phát hiện và loại forecast suy biến           │
+├──────────────────────────────────────────────────────────────────────┤
+│  ĐỀ XUẤT 4: MCDM Risk-Sensitive với Dynamic Tracking Metrics       │
+│  → Giải quyết Gap 2: xếp hạng đa tiêu chí toàn diện               │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ### 3.1 Đề xuất 1 — GARCH-Autoformer: Kiến trúc Lai Residual Correction
 
-#### 3.1.1 Động lực thiết kế (The Trade-off Problem)
+#### 3.1.1 Động lực
 
-Dự án xác định hai cực đoan trong benchmark:
+| | GARCH truyền thống | Autoformer thuần túy |
+|--|----|----|
+| **Thế mạnh** | Bám mean-reverting baseline, MSE/QLIKE ổn định | Bắt shock và chu kỳ, VaR pass rate cao hơn |
+| **Điểm yếu** | Phản ứng chậm với extreme shock → Kupiec fail | Over-smoothing → gọt micro-oscillation → MSE/QLIKE cao |
 
-| Đặc điểm | GARCH truyền thống | Autoformer thuần túy |
-|-----------|-------------------|----------------------|
-| **Thế mạnh** | Bám sát đường nền (mean-reverting baseline), MSE/QLIKE ổn định | Bắt được chu kỳ và shock ngắn hạn, VaR pass rate cao hơn |
-| **Điểm yếu** | Cứng nhắc, phản ứng chậm với shock cực đoan → Kupiec fail | Over-smoothing → gọt bỏ micro-oscillation → QLIKE/MSE cao |
+**Giải pháp:** GARCH xử lý phần tuyến tính (mean-reverting baseline), Autoformer xử lý phần phi tuyến (residual dynamics).
 
-**Mục tiêu:** Kết hợp để GARCH lo phần *mean-reverting baseline*, Autoformer lo phần *non-linear residuals*.
+#### 3.1.2 Sơ đồ kiến trúc
 
-> **Trích dẫn cần có:**
-> - Bollerslev (1986) — GARCH conditional variance.
-> - Wu et al. (2021) [Autoformer] — decomposition và auto-correlation mechanism.
-> - Donaldson & Kamstra (1997); Khashei & Bijari (2010) — nền tảng Neural Network học residual của ARIMA/GARCH.
-> - Kim & Won (2018) — GARCH-LSTM vượt trội GARCH bằng cách để NN xử lý phần dư phi tuyến.
+```mermaid
+flowchart TD
+    subgraph INPUT["Đầu vào"]
+        RT["Chuỗi log-return\nr_t = (r_{t-60}, ..., r_{t-1})"]
+    end
 
-#### 3.1.2 Kiến trúc — Pipeline 3 Giai đoạn (Residual Correction Hybrid)
+    subgraph STAGE1["Giai đoạn 1 — GARCH Base Model"]
+        GJR["GJR-GARCH / EGARCH\nMô hình hóa conditional variance\nω + α·ε²_{t-1} + γ·I_{t-1}·ε²_{t-1} + β·σ²_{t-1}"]
+        SIGMA_G["σ̂²_GARCH,t\n(Dự báo phương sai nền\n— hấp thụ biến động tuyến tính)"]
+        GJR --> SIGMA_G
+    end
 
-**Giai đoạn 1: Base Model — GARCH asymmetric**
+    subgraph STAGE2["Giai đoạn 2 — Residual Learning (Autoformer)"]
+        RES["Trích xuất Residual\ne_t = σ²_true,t − σ̂²_GARCH,t\nhoặc z_t = r_t / σ̂_GARCH,t"]
+        DECOMP["Series Decomposition\nTrend + Seasonal"]
+        AUTOCORR["Auto-Correlation Block\nTìm hidden periodicity trong residuals\n(không bị phân tâm bởi mean path)"]
+        EHEAD["Volatility Head\nLinear → GELU → Linear → Softplus"]
+        EPRED["ê_pred,t\n(Dự báo residual phi tuyến)"]
+        RES --> DECOMP
+        DECOMP --> AUTOCORR
+        AUTOCORR --> EHEAD
+        EHEAD --> EPRED
+    end
 
-Dùng mô hình GARCH bất đối xứng (GJR-GARCH hoặc EGARCH) để mô hình hóa chuỗi lợi nhuận $r_t$ và tạo dự báo phương sai nền:
-$$\hat{\sigma}^2_{\text{GARCH},\, t}$$
+    subgraph STAGE3["Giai đoạn 3 — Ensemble"]
+        FINAL["σ̂²_final,t = σ̂²_GARCH,t + ê_pred,t\n(Kết hợp tuyến tính)"]
+    end
 
-Dự báo này *hấp thụ* toàn bộ biến động tuyến tính bình thường của thị trường → *lock* chỉ số MSE/QLIKE ở mức an toàn.
+    subgraph OUTPUT["Đầu ra"]
+        VOL["Predicted Volatility\ncho h ∈ {1, 3, 5, 10, 21}"]
+        VAR["VaR Threshold\nVaR_α = μ + σ̂_final · q_α(Student-t)"]
+    end
 
-**Giai đoạn 2: Trích xuất và Học Residual bằng Autoformer**
-
-Chuỗi phần dư (phi tuyến tính mà GARCH không mô hình hóa được) được tính:
-$$e_t = \sigma^2_{\text{true},\, t} - \hat{\sigma}^2_{\text{GARCH},\, t}$$
-
-hoặc dùng chuẩn hóa (standardized residuals):
-$$z_t = \frac{r_t}{\hat{\sigma}_{\text{GARCH},\, t}}$$
-
-Autoformer nhận $e_t$ (hoặc $z_t$) làm đầu vào thay vì chuỗi lợi nhuận gốc nhiễu loạn. Lúc này, cơ chế **Auto-Correlation** của Autoformer dồn toàn bộ năng lực tìm *hidden periodicity trong các cú sốc* — không bị phân tâm bởi mean path đã được GARCH xử lý.
-
-$$\hat{e}_{\text{pred},\, t} = \text{Autoformer}(e_{t-1},\, e_{t-2},\, \ldots)$$
-
-**Giai đoạn 3: Ensemble — Tổng hợp tuyến tính**
-
-$$\hat{\sigma}^2_{\text{final},\, t} = \hat{\sigma}^2_{\text{GARCH},\, t} + \hat{e}_{\text{pred},\, t}$$
+    RT --> GJR
+    RT --> RES
+    SIGMA_G --> RES
+    SIGMA_G --> FINAL
+    EPRED --> FINAL
+    FINAL --> VOL
+    VOL --> VAR
+```
 
 #### 3.1.3 Lợi ích kỳ vọng
 
-- **MSE/QLIKE ổn định:** GARCH đã bám đường nền → không bao giờ over-smooth như Autoformer thuần túy.
-- **VaR pass rate cải thiện:** Khi có tin tức cực đoan (black swan), GARCH phản ứng chậm nhưng Autoformer nhận diện shock trong phần dư và bơm thêm $\hat{e}_{\text{pred}}$ → VaR được phình to kịp thời → Kupiec test pass.
+- **MSE/QLIKE ổn định:** GARCH đã bám đường nền → không bao giờ over-smooth.
+- **VaR cải thiện:** Khi có extreme shock, Autoformer nhận diện residual spike → bơm thêm vào forecast → VaR phình to kịp thời → Kupiec test pass.
 
-> **Trích dẫn cần có:**
-> - Zhao et al. (2024) [GARCH-LSTM AAAI 2024] — triết lý inject financial inductive bias vào neural network.
-> - Sezer et al. (2020) — survey hybrid GARCH-NN, residual learning approach.
-> - Expert Systems with Applications / IEEE Access (2023-2024) — Hybrid GARCH-Transformer papers.
+> **Trích dẫn:** Bollerslev (1986); Wu et al., NeurIPS (2021); Donaldson & Kamstra (1997); Khashei & Bijari (2010); Kim & Won (2018); Zhao et al., AAAI (2024); Sezer et al. (2020).
 
 ---
 
-### 3.2 Đề xuất 2 — Forecast Sanity Gate
+### 3.2 Đề xuất 2 — MoiraiVaR: VaR-Aware Fine-tuning của Foundation Model
 
-**Động lực:** Trước khi đưa bất kỳ mô hình nào vào ranking MCDM, cần kiểm tra mô hình đó có thực sự tạo ra forecast có động học hay không. Gate này giải quyết **Gap 1**.
+#### 3.2.1 Động lực
 
-**Hai điều kiện tối thiểu:**
+Moirai-family vốn mạnh nhất về MSE/MAE/QLIKE nhưng VaR calibration chưa tốt vì được fine-tune bằng MSE thuần túy. **Ý tưởng:** Nhúng trực tiếp VaR-aware objective vào training để model đồng thời tối ưu forecast accuracy VÀ tail-risk calibration.
+
+#### 3.2.2 Sơ đồ kiến trúc
+
+```mermaid
+flowchart TD
+    subgraph INPUT["Đầu vào"]
+        RT["60-day log-return window\nr_{t-60}, ..., r_{t-1}"]
+    end
+
+    subgraph PATCH["Patch Embedding"]
+        PAD["Padding 60 → 64 điểm"]
+        SPLIT["Chia thành 4 patches\nmỗi patch 16 giá trị"]
+        PAD --> SPLIT
+    end
+
+    subgraph BACKBONE["Moirai2 Pretrained Backbone"]
+        direction TB
+        ENC["Masked Encoder\n(Patch-based Attention)"]
+        POOL["Mean Pooling\n(theo chiều thời gian)\n→ 1 vector đặc trưng"]
+        ENC --> POOL
+    end
+
+    subgraph HEAD["MLP Volatility Head"]
+        L1["Linear(d_model → 256)"]
+        ACT["ReLU"]
+        DROP["Dropout(0.2)"]
+        L2["Linear(256 → 5)"]
+        L1 --> ACT --> DROP --> L2
+    end
+
+    subgraph OUTPUT["Dự báo"]
+        PVOL["Predicted Volatility\nσ̂_t for h ∈ {1, 3, 5, 10, 21}"]
+        VAR_TH["VaR Threshold\nVaR_1%,t = μ + σ̂_t · q_{0.01}(Student-t, ν=4)"]
+        PVOL --> VAR_TH
+    end
+
+    subgraph LOSS["VaR-Aware Training Loss"]
+        direction LR
+        MSE_L["MSE Loss\nMSE(σ̂, σ_true)"]
+        QVARLOSS["Quantile VaR Loss\nPinball Loss(r_t, VaR_1%)\n= max(0.01·(r_t − VaR_1%), 0.99·(VaR_1% − r_t))"]
+        TOTAL["Total Loss\n= MSE + λ · QuantileLoss\n(λ = 0.2)"]
+        MSE_L --> TOTAL
+        QVARLOSS --> TOTAL
+    end
+
+    subgraph TUNING["Fine-tuning Mode"]
+        direction LR
+        BB_LR["Backbone: lr = 1e-5\n(unfrozen — full fine-tune)"]
+        HD_LR["MLP Head: lr = 1e-3"]
+    end
+
+    RT --> PAD
+    SPLIT --> ENC
+    POOL --> L1
+    L2 --> PVOL
+    PVOL --> MSE_L
+    VAR_TH --> QVARLOSS
+    TOTAL --> BB_LR
+    TOTAL --> HD_LR
+```
+
+#### 3.2.3 Hai chế độ fine-tuning
+
+| Chế độ | Backbone | Head | λ | Mục đích |
+|--------|----------|------|---|----------|
+| **Head-only** | Frozen | Trainable | 0.0 | Baseline MSE |
+| **Head-only VaR-aware** | Frozen | Trainable | 0.2 | Nhúng VaR signal, bảo toàn backbone |
+| **Full fine-tune VaR-aware** | Unfrozen (lr=1e-5) | Trainable (lr=1e-3) | 0.2 | Thích nghi backbone với financial data |
+
+#### 3.2.4 Kết quả chính (Full fine-tune, λ=0.2, so với Moirai2 baseline)
+
+| Metric | Baseline | Full fine-tune | Thay đổi |
+|--------|----------|---------------|----------|
+| MSE | 0.02286 | 0.02157 | **−5.66%** |
+| MAE | 0.09071 | 0.08783 | **−3.17%** ✓ (p=0.033) |
+| QLIKE | 0.00908 | 0.00863 | **−4.92%** |
+| **MSE/MAE/QLIKE Rank** | — | **#1** toàn bộ models | |
+
+**Claim:** VaR-aware fine-tuning cải thiện đáng kể realized volatility forecasting, nhưng lợi thế này chưa chuyển hóa hoàn toàn thành VaR calibration superiority — minh chứng cho việc point forecast accuracy và tail-risk calibration là hai mục tiêu liên quan nhưng không đồng nhất.
+
+> **Trích dẫn:** Liu et al., ICML (2025); Praetz (1972); Blattberg & Gonedes (1974); Bollerslev (1987); Christoffersen (1998); Fan et al. (2008) [Student-t VaR for fat tails].
+
+---
+
+### 3.3 Đề xuất 3 — Forecast Sanity Gate
+
+#### 3.3.1 Hai điều kiện tối thiểu
 
 | Điều kiện | Công thức | Ngưỡng | Mục đích |
 |-----------|-----------|--------|----------|
-| Std-ratio error | `abs(std(predict)/std(true) - 1) ≤ 0.9` | ≤ 0.9 | Loại forecast phẳng (std(predict) ≈ 0) |
-| Tracking correlation | `corr(predict, true) > 0` | > 0 | Loại forecast không đồng biến với true volatility |
+| Std-ratio | `abs(std(predict)/std(true) − 1) ≤ 0.9` | ≤ 0.9 | Loại flat forecast |
+| Tracking corr | `corr(predict, true) > 0` | > 0 | Loại wrong-direction forecast |
 
-**Lý do thiết kế ngưỡng:**
-- **Ngưỡng 0.9 có chủ ý lỏng:** Không yêu cầu forecast phải biến động bằng true, chỉ yêu cầu `std(predict)/std(true) ≥ 0.1` — tức forecast có ít nhất 10% biến động so với true volatility.
-- **Tracking corr > 0 là điều kiện bổ sung:** Một mô hình có thể dao động mạnh nhưng đi ngược chiều true volatility → cũng bị loại.
-- Hai điều kiện bổ sung cho nhau: std-ratio loại flat forecast, tracking correlation loại wrong-direction forecast.
+**Metric tính theo từng `dataset × horizon`** trước khi aggregate để tránh variance giả.
 
-**Metric tính theo case trước khi aggregate:** Mỗi metric được tính riêng cho từng `dataset × horizon`, sau đó lấy trung bình ở cấp model. Điều này tránh *variance giả* do khác mức nền giữa thị trường.
+#### 3.3.2 Sơ đồ pipeline Gate
+
+```mermaid
+flowchart TD
+    subgraph INPUT["Đầu vào (sau Forecast/Risk evaluation)"]
+        METRICS["stats_by_model.csv\n(MSE, MAE, QLIKE, VaR metrics\ntheo cấp model-tier-branch)"]
+    end
+
+    subgraph COMPUTE["Tính Dynamic Tracking Metrics\n(theo từng dataset × horizon)"]
+        STD_R["Volatility Std-Ratio Error\nstd_ratio = std(predict) / std(true)\nerror = abs(std_ratio − 1)"]
+        TRACK["Tracking Correlation\ncorr = Pearson(true_vol, predict_vol)\ntracking_error = 1 − max(corr, 0)"]
+        AGG["Lấy trung bình theo model\n(tránh variance giả do khác mức nền)"]
+        STD_R --> AGG
+        TRACK --> AGG
+    end
+
+    subgraph GATE["Forecast Sanity Gate"]
+        C1{"std_ratio_error\n≤ 0.9?"}
+        C2{"tracking_corr\n> 0?"}
+        PASS["✅ Model hợp lệ\n→ Đưa vào MCDM ranking"]
+        FAIL["❌ Model bị loại\n→ ExcludedModels.csv\n→ Không xếp hạng SAW/TOPSIS"]
+        C1 -->|Yes| C2
+        C1 -->|No| FAIL
+        C2 -->|Yes| PASS
+        C2 -->|No| FAIL
+    end
+
+    INPUT --> COMPUTE
+    AGG --> C1
+```
+
+#### 3.3.3 Kết quả Gate (5 models bị loại)
+
+| Model | Std-ratio error | Tracking corr | Lý do |
+|-------|----------------|---------------|-------|
+| Reformer (Tier 3) | 1.000 | −0.00247 | Phẳng + âm |
+| Informer (Tier 1) | 0.649 | −0.00406 | Tracking âm |
+| Autoformer (Tier 3) | 0.919 | +0.00677 | Std-ratio > 0.9 |
+| Vanilla (Tier 3) | 1.000 | −0.000124 | Phẳng + âm |
+| Informer (Tier 3) | 1.000 | −0.00174 | Phẳng + âm |
 
 > **Trích dẫn:** Gneiting et al. (2007); Gneiting (2011); DTCenter METplus; Patton & Sheppard (2009); Kosma et al. (2022).
 
 ---
 
-### 3.3 Đề xuất 3 — MCDM Risk-Sensitive với Dynamic Tracking Metrics
+### 3.4 Đề xuất 4 — MCDM Risk-Sensitive với Dynamic Tracking Metrics
 
-**Động lực:** Sau khi Gate loại các forecast không hợp lệ, cần xếp hạng các mô hình còn lại theo đa tiêu chí phản ánh cả accuracy, dynamics tracking, và risk calibration. Giải quyết **Gap 2**.
+#### 3.4.1 Bộ 9 tiêu chí tích hợp
 
-#### 3.3.1 Bộ metrics tích hợp (9 tiêu chí)
+| Nhóm | Metric | Direction | Trọng số 5,5 | Trọng số 3,7 |
+|------|--------|-----------|-------------|-------------|
+| Forecast accuracy | MSE | cost | 0.100 | 0.060 |
+| Forecast accuracy | MAE | cost | 0.100 | 0.060 |
+| Forecast accuracy | QLIKE | cost | 0.100 | 0.060 |
+| **Dynamic tracking** | **Std-Ratio Error** | **cost** | **0.100** | **0.060** |
+| **Dynamic tracking** | **Tracking Corr Error** | **cost** | **0.100** | **0.060** |
+| Risk calibration | VaR 1% Pass Rate | benefit | 0.125 | 0.175 |
+| Risk calibration | VaR 1% Abs Violation | cost | 0.125 | 0.175 |
+| Risk calibration | VaR 5% Pass Rate | benefit | 0.125 | 0.175 |
+| Risk calibration | VaR 5% Abs Violation | cost | 0.125 | 0.175 |
 
-| Nhóm | Metric | Direction | Mô tả |
-|------|--------|-----------|-------|
-| Forecast accuracy | MSE | cost | Sai số bình phương trung bình |
-| Forecast accuracy | MAE | cost | Sai số tuyệt đối trung bình |
-| Forecast accuracy | QLIKE | cost | Quasi-likelihood loss, phù hợp latent volatility proxy |
-| **Dynamic tracking** | **Volatility Std-Ratio Error** | **cost** | **Phạt forecast phẳng** |
-| **Dynamic tracking** | **Tracking Correlation Error** | **cost** | **Phạt forecast sai hướng** |
-| Risk calibration | VaR 1% Pass Rate | benefit | Kupiec + Christoffersen independence test |
-| Risk calibration | VaR 1% Abs Violation Error | cost | `\|violation_rate - 0.01\|` |
-| Risk calibration | VaR 5% Pass Rate | benefit | |
-| Risk calibration | VaR 5% Abs Violation Error | cost | `\|violation_rate - 0.05\|` |
+#### 3.4.2 Sơ đồ pipeline MCDM đầy đủ
 
-#### 3.3.2 Hai kịch bản trọng số
+```mermaid
+flowchart TD
+    subgraph INPUTS["Đầu vào"]
+        VAR1["var_1pct/stats_by_model.csv"]
+        VAR5["var_5pct/stats_by_model.csv"]
+    end
 
-| Kịch bản | Accuracy block | Risk block | Mục đích |
-|----------|---------------|-----------|----------|
-| **5,5** | 50% | 50% | Đánh giá cân bằng accuracy-risk |
-| **3,7** | 30% | 70% | Risk-sensitive deployment (ưu tiên quản trị rủi ro) |
+    subgraph MERGE["Merge & Compute Dynamics"]
+        JOINT["Join 1% và 5% theo branch-tier-model"]
+        DYN["Tính Dynamic Metrics\nvol_std_ratio_error\ntracking_correlation_error\n(theo case → aggregate)"]
+        JOINT --> DYN
+    end
 
-#### 3.3.3 SAW và TOPSIS song song
+    subgraph GATE["Forecast Sanity Gate"]
+        G1{"std_ratio_error\n≤ 0.9 AND\ntracking_corr > 0?"}
+        EXCL["ExcludedModels.csv"]
+        VALID["Models hợp lệ\n(Decision Matrix)"]
+        G1 -->|No| EXCL
+        G1 -->|Yes| VALID
+    end
 
-- **SAW (Simple Additive Weighting):** Chuẩn hóa min-max và cộng điểm tuyến tính theo trọng số. Bù trừ mạnh — một tiêu chí rất tốt có thể kéo tiêu chí yếu.
-- **TOPSIS (Hwang & Yoon, 1981):** Chuẩn hóa vector, tính khoảng cách Euclid đến ideal best và ideal worst. Phạt mạnh mô hình lệch xa điểm lý tưởng ở bất kỳ chiều nào — không bù trừ tuyến tính.
+    subgraph MCDM["MCDM Ranking — 2 Scenarios"]
+        subgraph SAW["SAW (Simple Additive Weighting)"]
+            NORM_SAW["Min-max normalize\nBenefit: x/max | Cost: min/x"]
+            WSCORE["Weighted sum\nS_i = Σ w_j · r_ij"]
+            NORM_SAW --> WSCORE
+        end
+        subgraph TOPSIS["TOPSIS (Hwang & Yoon, 1981)"]
+            VNORM["Vector normalize\nr_ij = x_ij / √Σx²_ij"]
+            IDEAL["A+ (ideal best)\nA- (ideal worst)"]
+            DIST["D+_i = √Σ(v_ij−A+_j)²\nD-_i = √Σ(v_ij−A-_j)²"]
+            CC["C_i = D-_i / (D+_i + D-_i)"]
+            VNORM --> IDEAL
+            IDEAL --> DIST
+            DIST --> CC
+        end
+    end
 
-Sự đồng thuận giữa SAW và TOPSIS là bằng chứng vững chắc hơn cho ưu thế của một mô hình.
+    subgraph DOMINANCE["Dominance Test — GARCH-Autoformer"]
+        AGG_FAM["Aggregate theo model family\n(trung bình qua Tier 1, 2)"]
+        BINOM["Exact Binomial Test (one-sided)\nH0: P(win) = 0.5\nH1: P(win) > 0.5"]
+        PAIRWISE["GARCHAutoformerPairwiseDominance.csv"]
+        AGG_FAM --> BINOM
+        BINOM --> PAIRWISE
+    end
 
-#### 3.3.4 Dominance Test — Kiểm định thống kê ưu thế GARCH-Autoformer
+    subgraph OUTPUT_FINAL["Deliverables"]
+        SAW_CSV["SAWRanking.csv"]
+        TOP_CSV["TOPSISRanking.csv"]
+        COMB["CombinedMCDMRanking.csv"]
+        DOM["GARCHAutoformerDominanceSummary.csv"]
+    end
 
-Sau khi có SAW/TOPSIS score ở cấp model family (trung bình qua tier), pipeline kiểm định:
+    VAR1 --> JOINT
+    VAR5 --> JOINT
+    DYN --> G1
+    VALID --> NORM_SAW
+    VALID --> VNORM
+    WSCORE --> SAW_CSV
+    CC --> TOP_CSV
+    SAW_CSV --> COMB
+    TOP_CSV --> COMB
+    COMB --> AGG_FAM
+    SAW_CSV --> DOM
+    TOP_CSV --> DOM
+    PAIRWISE --> DOM
+```
 
-- **H0:** P(GARCH-Autoformer thắng model còn lại theo SAW/TOPSIS) = 0.5
-- **H1:** P > 0.5 (GARCH-Autoformer có ưu thế hệ thống)
+#### 3.4.3 Dominance Test — Kiểm định thống kê
 
-**Kiểm định chính:** Exact binomial test one-sided (phù hợp khi n nhỏ).
-**Báo thêm:** One-proportion z-test như xấp xỉ.
+- **H0:** P(GARCH-Autoformer thắng một model family) = 0.5
+- **H1:** P > 0.5
+- **Kiểm định chính:** Exact binomial test one-sided (n nhỏ → exact test ưu tiên hơn z-test).
 
-> **Trích dẫn:** Hwang & Yoon (1981); Kupiec (1995); Christoffersen (1998); Patton (2011); Demšar (2006).
+> **Trích dẫn:** Hwang & Yoon (1981); Kupiec (1995); Christoffersen (1998); Demšar (2006).
 
 ---
 
 ## 4. GIẢI THÍCH CƠ SỞ THIẾT KẾ
 
-### 4.1 Tại sao GARCH-Autoformer (Residual Correction) thay vì end-to-end Transformer?
+### 4.1 Tại sao GARCH-Autoformer (Residual Correction) thay vì end-to-end?
+Transformer thuần túy học chuỗi gốc nhiễu → rơi vào nghiệm phẳng. GARCH-Autoformer phân tách: phần tuyến tính (GARCH) + phần phi tuyến (Autoformer) → mỗi module xử lý tín hiệu sạch hơn. Triết lý "Divide and Conquer" — nền tảng từ Donaldson & Kamstra (1997), Kim & Won (2018).
 
-- Transformer thuần túy học chuỗi gốc (rất nhiễu) → rơi vào nghiệm phẳng khi noise cao.
-- GARCH-Autoformer tách bài toán thành hai phần: **phần tuyến tính (GARCH)** và **phần phi tuyến (Autoformer)** → mỗi module chỉ cần xử lý tín hiệu sạch hơn.
-- Đây là triết lý **"Chia để trị"** (Divide and Conquer) trong chuỗi thời gian, có nền tảng từ Donaldson & Kamstra (1997) và Kim & Won (2018).
+### 4.2 Tại sao MoiraiVaR dùng λ = 0.2 và Student-t (ν=4)?
+- **λ = 0.2:** Cân bằng giữa forecast accuracy (λ=0 = MSE-only) và tail-risk focus (λ lớn → overfit VaR, quên volatility path). Giá trị 0.2 là trade-off thực nghiệm.
+- **Student-t (ν=4):** Returns tài chính có fat tails → Gaussian assumption thiếu mass ở tail → underestimate risk. Student-t với ν ≈ 4–6 là lựa chọn có tiền lệ trong kinh tế lượng tài chính (Bollerslev, 1987; Praetz, 1972).
 
-### 4.2 Tại sao cần Sanity Gate trước MCDM, không phải metric thông thường đủ?
+### 4.3 Tại sao Sanity Gate cần thiết dù đã có MSE?
+MSE không phân biệt: MSE = 0.20 vì forecast phẳng khác với MSE = 0.20 vì tracking tốt nhưng có noise. VaR pass rate có thể tình cờ tốt khi violation rate ngẫu nhiên gần alpha. Gate là *bước sàng lọc tối thiểu* — không thay thế MCDM.
 
-- MSE/MAE không phân biệt được: mô hình có MSE = 0.20 vì forecast phẳng khác với mô hình có MSE = 0.20 vì tracking tốt nhưng có noise.
-- VaR pass rate có thể tình cờ tốt khi violation rate ngẫu nhiên gần alpha.
-- Gate không thay thế MCDM — nó là *bước sàng lọc tối thiểu* để loại những mô hình không nên có mặt trong bảng xếp hạng.
-
-### 4.3 Tại sao chạy cả SAW lẫn TOPSIS?
-
-- SAW và TOPSIS có bản chất toán học khác nhau (tuyến tính vs hình học).
-- SAW cho phép bù trừ → phù hợp khi muốn đánh giá "tổng giá trị mang lại".
-- TOPSIS phạt mạnh khi lệch xa ideal ở một chiều quan trọng → phù hợp khi muốn tìm "mô hình không có điểm yếu nghiêm trọng".
-- Sự đồng thuận giữa hai phương pháp = bằng chứng vững chắc hơn.
-
-> **Trích dẫn:** Hwang & Yoon (1981); Zeleny (1982) [MCDM framework]; Saaty (1980) [AHP — nếu đề cập trọng số].
+### 4.4 Tại sao SAW + TOPSIS song song?
+- **SAW:** Bù trừ tuyến tính → đánh giá "tổng giá trị mang lại".
+- **TOPSIS:** Phạt mạnh khi lệch xa ideal ở bất kỳ chiều → tìm "mô hình không có điểm yếu nghiêm trọng".
+- Đồng thuận giữa hai phương pháp = bằng chứng vững chắc hơn.
 
 ---
 
 ## 5. KẾT QUẢ VÀ PHÂN TÍCH
 
-### 5.1 Kết quả Forecast Sanity Gate
+### 5.1 Kết quả Forecast Ranking (Top models theo MSE)
 
-**5 mô hình bị loại (cùng nhau trong cả hai kịch bản 5,5 và 3,7):**
+| Rank | Model | MSE | MAE | QLIKE |
+|------|-------|-----|-----|-------|
+| **1** | **MoiraiVaR Full FT - Moirai2 (λ=0.2)** | **0.0216** | **0.0878** | **0.0086** |
+| 2 | Moirai 2 (baseline) | 0.0228 | 0.0906 | 0.0091 |
+| 3 | MoiraiVaR - Moirai2 (head-only, λ=0.2) | 0.0238 | 0.0948 | 0.0091 |
+| 4 | Moirai-MoE | 0.0248 | 0.0976 | 0.0091 |
+| ... | GARCH-LSTM-Hybrid | 0.1105 | 0.2362 | 0.0340 |
+| ... | Transformer / Informer / Autoformer | 0.19–0.93 | 0.32–0.51 | 0.07–0.16 |
 
-| Model | Std-ratio error | Tracking corr | Lý do loại |
-|-------|----------------|---------------|------------|
-| Reformer (Tier 3) | 1.000 | −0.00247 | Phẳng hoàn toàn + tracking âm |
-| Informer (Tier 1) | 0.649 | −0.00406 | Tracking correlation âm |
-| Autoformer (Tier 3) | 0.919 | +0.00677 | Std-ratio error vượt ngưỡng 0.9 |
-| Vanilla (Tier 3) | 1.000 | −0.000124 | Phẳng hoàn toàn + tracking âm |
-| Informer (Tier 3) | 1.000 | −0.00174 | Phẳng hoàn toàn + tracking âm |
+### 5.2 Kết quả Sanity Gate (5 models bị loại)
 
-**Nhận xét:** Các mô hình bị loại đều là Transformer tier lớn — mô hình phức tạp hơn không đồng nghĩa forecast tốt hơn trong bài toán này.
+Xem bảng tại Phần 3.3.3 — tất cả đều là Transformer tier lớn.
 
----
-
-### 5.2 Kết quả MCDM — Cấu hình 5,5 (Accuracy 50% / Risk 50%)
+### 5.3 MCDM — Cấu hình 5,5 (Accuracy 50% / Risk 50%)
 
 | Rank | Model | Accuracy score | Risk score | SAW rank | TOPSIS rank |
 |------|-------|---------------|-----------|---------|------------|
@@ -306,14 +445,11 @@ Sau khi có SAW/TOPSIS score ở cấp model family (trung bình qua tier), pipe
 | 1 | **GARCH-Autoformer (Tier 2)** | 0.223 | **0.443** | 3 | **1** |
 | 3 | Moirai-MoE | 0.492 | 0.179 | 2 | 4 |
 
-- **GARCH-Autoformer (Tier 2) đạt TOPSIS rank 1** — gần điểm lý tưởng đa chiều nhất.
-- Moirai-family dẫn SAW nhờ accuracy score vượt trội, nhưng thua TOPSIS vì risk score thấp.
-- **Dominance test (TOPSIS):** GARCH-Autoformer thắng **15/15** model family, exact binomial p = 0.000031.
-- **Dominance test (SAW):** Thắng 11/15 (73.3%), exact binomial p = 0.059 — sát ngưỡng.
+- GARCH-Autoformer (Tier 2) đạt **TOPSIS rank 1** — gần điểm lý tưởng đa chiều nhất.
+- MoiraiVaR dẫn SAW nhờ accuracy score cao.
+- **Dominance test (TOPSIS):** GARCH-Autoformer thắng **15/15**, p = 0.000031.
 
----
-
-### 5.3 Kết quả MCDM — Cấu hình 3,7 (Accuracy 30% / Risk 70%)
+### 5.4 MCDM — Cấu hình 3,7 (Accuracy 30% / Risk 70%)
 
 | Rank | Model | SAW rank | TOPSIS rank | SAW score | TOPSIS score |
 |------|-------|---------|------------|----------|-------------|
@@ -321,57 +457,47 @@ Sau khi có SAW/TOPSIS score ở cấp model family (trung bình qua tier), pipe
 | 2 | Reformer (Tier 2) | 3 | 2 | 0.589 | 0.695 |
 | 3 | GARCH-Autoformer (Tier 1) | 2 | 5 | 0.672 | 0.673 |
 
-- GARCH-Autoformer **thắng rõ ràng cả SAW lẫn TOPSIS** khi ưu tiên risk.
-- **Dominance test (SAW + TOPSIS):** Thắng **15/15**, exact binomial p = 0.000031 (cả hai metric).
-- **Mean relative difference:** +96.7% (SAW), +102.18% (TOPSIS).
+- **Dominance test (SAW + TOPSIS):** Thắng **15/15**, p = 0.000031 cả hai.
+- Mean relative difference: +96.7% (SAW), +102.18% (TOPSIS).
 
----
+### 5.5 Phân tích Trade-off — Bức tranh tổng hợp
 
-### 5.4 Phân tích Trade-off Accuracy vs Risk
+| Model | Forecast accuracy | VaR calibration | Phù hợp deployment |
+|-------|-----------------|-----------------|-------------------|
+| **MoiraiVaR Full FT** | **Tốt nhất (rank #1)** | Trung bình | Point forecast |
+| **MoiraiVaR Head-only** | Tốt (rank #3) | Trung bình | Point forecast |
+| **Moirai-family** | Rất tốt | Trung bình | Point forecast |
+| **GARCH-Autoformer** | Trung bình | **Tốt nhất (risk-sensitive)** | Risk management |
+| Transformer thuần túy | Yếu → bị Gate loại | — | Không hợp lệ |
 
-Kết quả xác nhận hai nhóm mô hình phù hợp với hai mục tiêu deployment khác nhau:
+**Insight chính:** Không có một ranking duy nhất — phụ thuộc vào deployment objective. MoiraiVaR chứng minh VaR-aware fine-tuning cải thiện forecast accuracy nhưng chưa giải quyết hoàn toàn tail-risk calibration.
 
-| Nhóm | Thế mạnh | Phù hợp khi |
-|------|----------|-------------|
-| **Moirai-family** | Accuracy score cao (MSE thấp nhất) | Deployment cần forecast point volatility chính xác |
-| **GARCH-Autoformer** | Risk score cao (VaR calibration tốt, tracking tốt) | Deployment ưu tiên risk management |
-
-**Insight chính:** Không có ranking duy nhất — ranking phụ thuộc vào preference của nhà quản trị rủi ro.
-
-> **Trích dẫn:** Christoffersen & Diebold (2000); Patton (2011); Fikri (2025) [regime-dependent performance]; Hwang & Yoon (1981).
-
----
-
-### 5.5 Giải thích kết quả trong bối cảnh Mean Reversion và Stationarity
-
-- Test split có **26/45 chuỗi non-stationary** (vs 6/45 trong train) → regime shift trong giai đoạn đánh giá.
-- Mô hình học mean path của chuỗi mean-reverting trong train → khi gặp regime shift → forecast phẳng.
-- VaR backtesting "tình cờ" tốt ở một số case → không phản ánh khả năng thực sự → **Gate cần thiết để loại trước MCDM**.
-- GARCH-Autoformer ổn định hơn vì GARCH component đã encode mean-reverting behavior → Autoformer chỉ cần xử lý residuals, ít bị ảnh hưởng bởi regime shift hơn.
+> **Trích dẫn:** Christoffersen & Diebold (2000); Patton (2011); Fikri (2025).
 
 ---
 
 ## 6. KẾT LUẬN VÀ HƯỚNG MỞ RỘNG
 
-### 6.1 Kết luận chính
+### 6.1 Bốn đóng góp chính
 
-Ba đóng góp của nghiên cứu:
+1. **GARCH-Autoformer:** Kiến trúc lai 3 giai đoạn (GARCH baseline + Autoformer residual learning + linear ensemble). TOPSIS rank 1 ở cả hai kịch bản, thắng 15/15 model family ở risk-sensitive (p = 0.000031).
 
-1. **GARCH-Autoformer (Residual Correction Hybrid):** Kiến trúc lai kết hợp inductive bias của GARCH với khả năng học residual phi tuyến của Autoformer. Mô hình đạt TOPSIS rank 1 ở cả hai kịch bản và thắng 15/15 model family ở kịch bản risk-sensitive (p = 0.000031).
+2. **MoiraiVaR (VaR-Aware Fine-tuning):** Full fine-tuning Moirai2 với loss = MSE + λ·QuantileLoss(VaR_1%) đạt MSE/MAE/QLIKE rank #1 trong toàn bộ models. Cung cấp bằng chứng rằng point forecast accuracy và tail-risk calibration là hai mục tiêu liên quan nhưng không đồng nhất.
 
-2. **Forecast Sanity Gate:** Cơ chế sàng lọc hai điều kiện tối thiểu trước MCDM, loại 5/26 mô hình Transformer tier lớn có forecast gần như phẳng hoặc không đồng biến với true volatility.
+3. **Forecast Sanity Gate:** Cơ chế sàng lọc tối thiểu (std_ratio_error ≤ 0.9 + tracking_corr > 0) loại 5/26 Transformer tier lớn có forecast suy biến trước khi đưa vào MCDM ranking.
 
-3. **MCDM Risk-Sensitive với Dynamic Tracking:** Framework đánh giá 9 tiêu chí tích hợp forecast accuracy, dynamic tracking và risk calibration, vận hành hai phương pháp xếp hạng (SAW + TOPSIS) và hai kịch bản preference (5,5 và 3,7).
+4. **MCDM Risk-Sensitive với Dynamic Tracking:** Framework 9 tiêu chí, 2 phương pháp xếp hạng (SAW + TOPSIS), 2 kịch bản preference (5,5 và 3,7), kết thúc bằng exact binomial dominance test.
 
 ### 6.2 Hạn chế và Hướng mở rộng
 
-| Hạn chế hiện tại | Hướng mở rộng tương lai |
-|-----------------|------------------------|
-| Dominance test ở cấp aggregate (model family) | Block-level SAW/TOPSIS theo 45 `dataset×horizon`, Friedman/Nemenyi |
-| Ngưỡng gate (0.9, tracking > 0) chưa có ablation | Ablation: 0.8, 0.85, 0.9, 0.95; báo cáo model nào bị loại/giữ |
-| Hai kịch bản trọng số (5,5 và 3,7) | Weight sensitivity analysis: risk weight 0→1, Pareto frontier |
-| Stationarity suy ra từ split 70/15/15 | Rolling stationarity diagnostics, regime-aware evaluation |
-| Chưa có Expected Shortfall (ES) | Mở rộng sang ES, CVaR, regulatory backtests (Basel III) |
+| Hạn chế hiện tại | Hướng mở rộng |
+|-----------------|--------------|
+| Dominance test ở cấp aggregate | Block-level SAW/TOPSIS + Friedman/Nemenyi trên 45 blocks |
+| Ngưỡng Gate (0.9, corr > 0) chưa có ablation | Ablation: 0.8, 0.85, 0.9, 0.95 |
+| λ = 0.2 chưa có ablation đầy đủ | Chạy λ ∈ {0.0, 0.1, 0.2, 0.5} |
+| MoiraiVaR chưa có direct VaR head | Thêm VaR 1% + VaR 5% head riêng biệt |
+| Chưa có Expected Shortfall | Mở rộng sang ES, CVaR, Basel III backtests |
+| Stationarity suy ra từ split 70/15/15 | Rolling stationarity + regime-aware evaluation |
 
 ---
 
@@ -379,36 +505,36 @@ Ba đóng góp của nghiên cứu:
 
 | Section | Trích dẫn chính |
 |---------|----------------|
-| **1.1** — Trade-off forecast vs risk | Christoffersen & Diebold (2000); Patton (2011); Bollerslev (1986) |
-| **1.2 Gap 1** — Flat forecast problem | Gneiting 2011; Gneiting et al. 2007; Kosma et al. 2022; DTCenter METplus; Patton & Sheppard 2009 |
-| **1.2 Gap 2** — MCDM thiếu dynamic tracking | Hwang & Yoon 1981; Kupiec 1995; Christoffersen 1998; Patton 2011 |
-| **2.1** — Mean Reversion | Bollerslev 1986; Engle 1982; Baillie et al. 1996; Mandelbrot 1963 |
-| **2.2** — ADF/KPSS tests | Dickey & Fuller 1979; Kwiatkowski et al. 1992; Perron 1989; Hamilton 1994 |
-| **2.3** — Flat forecast | Chen et al. ICML 2025; Zeng et al. AAAI 2023; Lim & Zohren 2021; Kosma 2022 |
-| **3.1** — GARCH-Autoformer design | Bollerslev 1986; Wu et al. NeurIPS 2021; Donaldson & Kamstra 1997; Khashei & Bijari 2010; Kim & Won 2018; Zhao et al. AAAI 2024; Sezer et al. 2020 |
-| **3.2** — Sanity Gate | Gneiting et al. 2007; Gneiting 2011; DTCenter METplus; Patton & Sheppard 2009 |
-| **3.3** — MCDM SAW+TOPSIS | Hwang & Yoon 1981; Zeleny 1982; Kupiec 1995; Christoffersen 1998 |
-| **3.4** — Dominance Test | Demšar 2006; Zhao et al. AAAI 2024 |
-| **5.4** — Trade-off analysis | Christoffersen & Diebold 2000; Patton 2011; Fikri 2025 |
+| **1.1** | Christoffersen & Diebold (2000); Patton (2011); Bollerslev (1986) |
+| **1.2 Gap 1** | Gneiting 2011; Gneiting et al. 2007; Kosma 2022; DTCenter; Patton & Sheppard 2009 |
+| **1.2 Gap 2** | Hwang & Yoon 1981; Kupiec 1995; Christoffersen 1998 |
+| **1.2 Gap 3** | Liu et al. ICML 2025; Praetz 1972; Bollerslev 1987 |
+| **2.1** | Bollerslev 1986; Engle 1982; Baillie et al. 1996; Mandelbrot 1963 |
+| **2.2** | Dickey & Fuller 1979; Kwiatkowski et al. 1992; Perron 1989 |
+| **2.3** | Chen et al. ICML 2025; Zeng et al. AAAI 2023; Lim & Zohren 2021; Kosma 2022 |
+| **3.1 — GARCH-Autoformer** | Bollerslev 1986; Wu et al. NeurIPS 2021; Donaldson & Kamstra 1997; Kim & Won 2018; Zhao et al. AAAI 2024; Sezer et al. 2020 |
+| **3.2 — MoiraiVaR** | Liu et al. ICML 2025; Praetz 1972; Blattberg & Gonedes 1974; Bollerslev 1987; Christoffersen 1998; Fan et al. 2008 |
+| **3.3 — Sanity Gate** | Gneiting et al. 2007; Gneiting 2011; DTCenter; Patton & Sheppard 2009; Kosma 2022 |
+| **3.4 — MCDM** | Hwang & Yoon 1981; Zeleny 1982; Kupiec 1995; Christoffersen 1998; Demšar 2006 |
+| **5.5 — Trade-off** | Christoffersen & Diebold 2000; Patton 2011; Fikri 2025 |
 
 ---
 
 ## GHI CHÚ THỰC HIỆN
 
 > [!IMPORTANT]
-> **Phần 3 (Đề xuất của chúng tôi) là phần trung tâm của bài báo.** Cần viết đủ độ sâu để reviewer thấy rõ novelty của từng đề xuất và lý do chúng giải quyết đúng gap được nêu ở Phần 1.2.
+> **Phần 3 bây giờ có 4 đề xuất.** GARCH-Autoformer và MoiraiVaR đều là đóng góp kiến trúc/training-method. Sanity Gate và MCDM là đóng góp về evaluation framework.
 
 > [!TIP]
-> **Thứ tự trình bày trong Phần 3 nên là:** GARCH-Autoformer (model mới) → Sanity Gate (mechanism mới) → MCDM (framework mới). Trình bày theo thứ tự từ model-level đến pipeline-level.
+> Thứ tự khuyến nghị khi viết: Model contributions (3.1, 3.2) → Evaluation framework (3.3, 3.4). Trình bày theo thứ tự từ model-level đến pipeline-level.
 
 > [!NOTE]
 > **Nguồn số liệu:**
+> - MoiraiVaR: `docs/research_summary/2026-07-19/bao_cao_moirai2_var_aware_full_finetune.md`
+> - GARCH-Autoformer: `docs/research_summary/2026-07-21/method2_hybrid_garch_autoformer.md`
 > - MCDM results: `output/mcdm_results/MCDM20260725170414/`
-> - Stationarity: `output/stats_analysis/stationarity/stationarity_20260725_173107/`
+> - Sanity Gate results: `output/mcdm_results/MCDM20260727104251/5,5/ExcludedModels.csv`
 > - Forecast ranking: `output/stats_analysis/research_summary/forecast_ranking.csv`
-> - MCDM input metrics: `output/mcdm_results/MCDM20260727104251/5,5/MCDMInputMetrics.csv`
 
 > [!WARNING]
-> **Lưu ý về reviewer feedback (từ `review_mapr.md`):**
-> - Reviewer 2 & 3 chỉ ra novelty framework còn hạn chế — phần Sanity Gate và Dynamic Tracking Metrics cần được nhấn mạnh như **methodological contribution** cụ thể, không chỉ là "kết hợp existing techniques".
-> - Cần giải thích rõ *tại sao* tracking correlation và std-ratio error được thiết kế theo từng case trước khi aggregate — đây là điểm kỹ thuật quan trọng để tránh bị phê là heuristic đơn giản.
+> **Lưu ý về MoiraiVaR:** Claim phải đúng mức — không claim "VaR forecasting vượt trội toàn diện" mà claim "VaR-aware fine-tuning cải thiện đáng kể forecast accuracy; cải thiện này chưa chuyển hóa hoàn toàn sang VaR calibration — bằng chứng cho sự tách biệt của hai mục tiêu".
