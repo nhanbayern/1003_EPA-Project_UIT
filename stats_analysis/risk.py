@@ -78,7 +78,9 @@ class StudentTVaRMethod(VaRMethod):
         if nu is None or not np.isfinite(float(nu)):
             return out
 
-        q_alpha = stats.t.ppf(self.alpha, df=float(nu))
+        # Apply variance scale factor for standardized Student-t (M3 fix)
+        scale_factor = np.sqrt((float(nu) - 2.0) / float(nu)) if float(nu) > 2.0 else 1.0
+        q_alpha = stats.t.ppf(self.alpha, df=float(nu)) * scale_factor
         out[mask] = self.mu + np.maximum(vol[mask], self.epsilon) * q_alpha
         return out
 
