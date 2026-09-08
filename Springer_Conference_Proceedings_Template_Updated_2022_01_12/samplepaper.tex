@@ -20,7 +20,7 @@ Corresponding author e-mail: \email{thuannd@uit.edu.vn}}
 \maketitle
 
 \begin{abstract}
-While time-series foundation models (TSFMs) achieve state-of-the-art point accuracy through large-scale pretraining, their zero-shot representations do not inherently capture asymmetric financial tail risk. We propose \textit{MoiraiVaR}, a parameter-efficient fine-tuning (PEFT) framework that aligns pretrained TSFMs with volatility forecasting via a VaR-aware joint objective. By coupling a frozen Moirai-family backbone to a compact regression head, we optimize mean squared error alongside a Student-$t$ Value-at-Risk pinball loss. Furthermore, we address critical flaws in machine-learning volatility evaluation through a three-layer protocol: a Forecast Sanity Gate to filter models exhibiting degenerate representation learning (e.g., constant forecasts), and an average-of-distributions VaR metric to prevent evaluator-induced distribution leakage. Evaluating 1.3 million predictions across 26 configurations, we demonstrate that MoiraiVaR--Moirai-MoE occupies a non-dominated position on the accuracy--tail Pareto frontier. Multi-criteria decision making confirms that this architecture ranks first globally by both SAW and TOPSIS under balanced and risk-priority policies, offering a robust representation for financial risk management.
+While time-series foundation models (TSFMs) provide useful pretrained representations, their zero-shot outputs do not directly optimize asymmetric financial tail risk. We study \textit{MoiraiVaR}, a frozen-backbone, VaR-aware head adaptation for volatility forecasting. A compact regression head is trained with a joint volatility MSE and Student-$t$ Value-at-Risk pinball objective. We evaluate the resulting accuracy--risk trade-off using a Forecast Sanity Gate, distribution-specific VaR diagnostics, and a secondary multi-criteria ranking analysis. Across nine equity indices and 45 market--horizon blocks, the stored experiments show that VaR-aware adaptation can reduce VaR quantile loss relative to the corresponding MSE-only Moirai head while retaining competitive multi-horizon volatility accuracy. The improvement is modest and configuration-dependent: GARCH models remain strong standalone VaR baselines, whereas MoiraiVaR is best interpreted as a competitive accuracy--risk compromise within the neural model family.
 
 \keywords{MoiraiVaR \and time-series foundation model \and volatility forecasting \and Value-at-Risk \and Pareto frontier \and multi-criteria decision making}
 \end{abstract}
@@ -28,7 +28,9 @@ While time-series foundation models (TSFMs) achieve state-of-the-art point accur
 \section{Introduction}
 Recent advances in time-series foundation models (TSFMs) have demonstrated strong zero-shot transfer capabilities through large-scale pretraining on heterogeneous data \cite{ref7,ref8}. While TSFMs excel at minimizing mean squared error (MSE) for point forecasting, their learned representations do not inherently optimize for asymmetric tail-risk applications such as Value-at-Risk (VaR). Relying solely on standard scalar losses fails to guarantee the realistic amplitude scaling required for financial decision-making \cite{ref1}.
 
-To align foundation models with financial risk objectives, we propose \textit{MoiraiVaR}, a parameter-efficient fine-tuning (PEFT) framework. MoiraiVaR couples a frozen pretrained Moirai representation to a multi-horizon regression head, trained using a joint point--tail objective that minimizes MSE alongside a Student-$t$ VaR pinball loss.
+The proposed risk-aware head is related to established econometric approaches that model conditional quantiles directly, including CAViaR \cite{ref17}, and to volatility specifications such as HAR-RV \cite{ref18} and GJR--GARCH \cite{ref19}. It should therefore be understood as a transfer-learning implementation of a familiar quantile-risk objective, rather than as a new VaR estimator in isolation. The broader TSFM literature includes Chronos, TimesFM, and Lag-Llama, while empirical work also cautions that Transformer gains can be sensitive to the forecasting setup \cite{ref20,ref21,ref22,ref23}. These studies motivate the paired baselines and the conservative interpretation of the reported rankings.
+
+To align foundation models with financial risk objectives, we study \textit{MoiraiVaR}, a frozen-backbone head-adaptation method. The method couples a pretrained Moirai representation to a multi-horizon regression head, trained using a joint point--tail objective that minimizes MSE alongside a Student-$t$ VaR pinball loss. Because only the downstream head is updated, we use ``head adaptation'' rather than the broader PEFT label used for methods such as adapters or LoRA.
 
 In addition to the architecture, this paper introduces a robust three-layer machine-learning evaluation methodology designed to prevent common benchmarking flaws in volatility forecasting:
 
@@ -38,15 +40,17 @@ In addition to the architecture, this paper introduces a robust three-layer mach
 \item \textbf{Accuracy--Risk Pareto Framework.} We evaluate the intrinsic trade-off between predictive point accuracy and tail-risk calibration using dual-policy multi-criteria decision making (MCDM).
 \end{enumerate}
 
-Evaluating 26 configurations across 1.3 million predictions, our headline result establishes that MoiraiVaR--Moirai-MoE is the only architecture ranked first globally by both Simple Additive Weighting (SAW) and TOPSIS under balanced and risk-priority policies. It occupies a non-dominated position on the accuracy--tail Pareto frontier, providing the most robust representation across heterogeneous tail distributions.
+The main result is a paired comparison: relative to the corresponding MSE-only head, VaR-aware adaptation generally improves tail quantile loss, but the effect varies with the backbone and the value of $\lambda_{\mathrm{VaR}}$. MCDM and Pareto summaries are used as descriptive robustness analyses rather than as evidence of universal superiority.
 
 \section{MoiraiVaR}
-Let $r_t$ denote the percentage log return at time $t$, and let $x_t = (r_{t-59}, \dots, r_t)$ be the 60-day return context. The target $y_{t,h}$ is the $h$-day realized standard deviation of daily log returns:
+Let $r_t$ denote the percentage log return at time $t$, and let $x_t = (r_{t-59}, \dots, r_t)$ be the 60-day return context. In the implemented data construction, the target is a rolling-volatility proxy evaluated at an offset $h$:
 \begin{equation}
-y_{t,h} = \sqrt{\frac{1}{h} \sum_{k=1}^{h} r_{t+k}^2}.
+y_{t,h} = \operatorname{sd}(r_{t+h-60},\ldots,r_{t+h-1}), \qquad h\in\{1,3,5,10,21\}.
 \end{equation}
 
-A frozen pretrained Moirai-family encoder processes the return context into a sequence of representations. Temporal mean pooling yields a fixed-size feature vector $h_t$, which feeds a two-layer multilayer perceptron to produce volatility forecasts $\hat{\sigma}_{t,h}$ for horizons $\mathcal{H} = \{1, 3, 5, 10, 21\}$. This parameter-efficient adaptation isolates whether a shared pretrained representation can be redirected toward volatility forecasting without full retraining.
+Thus, $h$ indexes the forecast offset of the rolling 60-day standard deviation; it is not an $h$-day realized RMS return. In particular, $h=1$ is aligned with the end of the input window, while larger $h$ values provide offset rolling-volatility targets.
+
+A frozen pretrained Moirai-family encoder processes the return context into a sequence of representations. Temporal mean pooling yields a fixed-size feature vector $h_t$, which feeds a two-layer multilayer perceptron to produce volatility forecasts $\hat{\sigma}_{t,h}$ for horizons $\mathcal{H} = \{1, 3, 5, 10, 21\}$. This head-only adaptation isolates whether a shared pretrained representation can be redirected toward volatility forecasting without full retraining.
 
 For target $y_{t,h}$ and prediction $\hat{\sigma}_{t,h}$, the multi-horizon accuracy term is
 \begin{equation}
@@ -60,9 +64,10 @@ For target $y_{t,h}$ and prediction $\hat{\sigma}_{t,h}$, the multi-horizon accu
 \label{fig1}
 \end{figure}
 
-The risk-aware penalty uses the one-step prediction and the 1\% lower Student-$t$ quantile:
+The risk-aware penalty uses the one-step prediction and the 1\% lower standardized Student-$t$ quantile. If $t_{\alpha,\nu}$ denotes the unit-scale Student-$t$ quantile, standardizing the distribution to variance one gives
 \begin{equation}
-v_{t,0.01} = \hat{\sigma}_{t,1} t_{0.01,\nu}.
+q_{\alpha,\nu}=t_{\alpha,\nu}\sqrt{\frac{\nu-2}{\nu}}, \qquad
+v_{t,\alpha}=\hat{\sigma}_{t,1}q_{\alpha,\nu}, \quad \alpha=0.01.
 \end{equation}
 
 With $u_t = r_{t+1} - v_{t,0.01}$, the pinball loss \cite{ref9} is
@@ -72,19 +77,19 @@ With $u_t = r_{t+1} - v_{t,0.01}$, the pinball loss \cite{ref9} is
 
 The joint objective is
 \begin{equation}
-\mathcal{L} = \mathcal{L}_{\text{vol}} + \lambda_{\text{VaR}} \mathcal{L}_{\text{VaR}}, \quad \lambda_{\text{VaR}} = 0.2.
+\mathcal{L} = \mathcal{L}_{\text{vol}} + \lambda_{\text{VaR}} \mathcal{L}_{\text{VaR}}.
 \end{equation}
 
-The degrees of freedom $\nu$ are estimated from the training-return excess kurtosis to adapt the tail term dynamically to market-level data. During parameter-efficient fine-tuning, only the downstream regression head is trained using AdamW (learning rate $10^{-3}$, weight decay $10^{-4}$), gradient clipping at 1.0, dropout of 0.2, and early stopping with a patience of seven epochs.
+The stored primary runs use $\lambda_{\text{VaR}}=0.2$; additional stored runs cover $\lambda_{\text{VaR}}\in\{0.3,0.4,0.5\}$ for sensitivity analysis. The degrees of freedom $\nu$ are estimated from the training-return excess kurtosis and clipped to $[2.1,30]$. The resulting market-level values are 6.279 (DAX), 5.650 (Euronext), 4.864 (IBEX), 5.228 (KOSPI), 5.249 (Nikkei), 4.896 (SMI), 5.258 (S\&P 500), 6.788 (VN30), and 6.848 (VN-Index). During head adaptation, only the downstream regression head is trained using AdamW (learning rate $10^{-3}$, weight decay $10^{-4}$), gradient clipping at 1.0, dropout of 0.2, and early stopping with a patience of seven epochs. The original stored runs used the unstandardized Student-$t$ threshold; therefore, the standardized expression above defines the corrected convention, while comparisons based on the stored runs are interpreted as retrospective, descriptive results rather than a claim of a fully rerun corrected training pipeline.
 
 \section{Accuracy--Risk Evaluation Framework}
 Our three-layer evaluation protocol ensures that rankings are dynamically informative and robust against distribution leakage.
 
 \subsection{Layer 1: Multi-Distribution VaR Construction}
-To decouple evaluation from the Student-$t$ training penalty, three VaR constructions are backtested independently via Kupiec and Christoffersen tests \cite{ref12,ref13}. The risk criteria entering the decision matrix cover Normal, conditional Student-$t$ \cite{ref10}, and filtered historical simulation (FHS) \cite{ref11}. They are the equally weighted averages of method-level pass rates $\text{PR}_\alpha$ and absolute violation errors $E_\alpha$ for $\alpha \in \{0.01, 0.05\}$. This design prevents models from appearing superior merely by matching the evaluator's distributional assumptions.
+To decouple evaluation from the Student-$t$ training penalty, three VaR constructions are evaluated separately: Normal, conditional Student-$t$ \cite{ref10}, and filtered historical simulation (FHS) \cite{ref11}. For each construction we report the empirical violation rate, out-of-sample quantile loss, and the Christoffersen independence component alongside the Kupiec and Christoffersen test decisions \cite{ref12,ref13}. A violation rate close to the nominal level is treated as descriptive calibration evidence; a non-rejection is not itself interpreted as proof of calibration. The original MCDM table additionally contains averaged pass-rate and absolute-violation summaries for comparability with the stored analysis.
 
 \subsection{Layer 2: Forecast Sanity Gate and Decision Matrix}
-Deep-learning models can suffer from degenerate representation learning, where a near-constant sequence minimizes MSE by predicting the global mean. Such degenerate models can pass VaR backtests coincidentally without actually tracking volatility dynamics. To exclude these trivial local optima before ranking, a Forecast Sanity Gate requires all model outputs to exhibit at least 10\% of the realized target's variability ($s_{\hat{y}}/s_y \ge 0.1$) and an average tracking correlation $\bar{\rho} > 0$.
+Deep-learning models can suffer from degenerate representation learning, where a near-constant sequence minimizes MSE by predicting the global mean. Such degenerate models can pass VaR backtests coincidentally without actually tracking volatility dynamics. To exclude near-constant local optima before ranking, a Forecast Sanity Gate requires the aggregate forecast variability ratio to satisfy $s_{\hat{y}}/s_y \ge 0.1$ and the aggregate tracking correlation to be positive. The value 0.1 is an operational screening threshold: it removes forecasts whose variability is at most one tenth of the target variability while retaining weak but non-constant forecasts. The continuous amplitude and correlation errors remain in the decision matrix, so the Gate is interpreted only as a pre-ranking validity screen rather than as a second performance metric.
 
 The remaining valid configurations are assessed on nine criteria grouped into two blocks:
 \begin{itemize}
@@ -93,18 +98,18 @@ The remaining valid configurations are assessed on nine criteria grouped into tw
 \end{itemize}
 
 \subsection{Layer 3: Pareto Non-Dominance and MCDM}
-Configurations are first evaluated for Pareto non-dominance to explicitly map the accuracy--tail trade-off. We then apply two aggregation methods: SAW \cite{ref14} and TOPSIS \cite{ref15,ref16}. To ensure robust conclusions, a model is declared the winner only if it ranks first by both methods under both a \textit{balanced policy} (50\% Accuracy, 50\% Risk) and a \textit{risk-priority policy} (30\% Accuracy, 70\% Risk). Sensitivity checks varying the block weights and raising the tracking-correlation threshold confirm the stability of the final ranking.
+Configurations are first evaluated for Pareto non-dominance to map the accuracy--tail trade-off. We then use SAW \cite{ref14} and TOPSIS \cite{ref15,ref16} as descriptive aggregation methods. Their ranks are not treated as a substitute for paired loss comparisons or statistical calibration tests. Sensitivity checks varying the block weights and the tracking-correlation threshold are reported to show how dependent the composite ordering is on the policy specification.
 
 \section{Experimental Study}
 
 \subsection{Data and Competitors}
-The source contains 1,322,330 daily prediction rows covering VN-Index, VN30, KOSPI, Nikkei 225, DAX 40, Euronext 100, IBEX 35, SMI, and S\&P 500 at horizons $\{1, 3, 5, 10, 21\}$. The 26 configurations form 1,170 configuration--market--horizon blocks. Competitors include four GARCH-family models (including FI-GARCH \cite{ref3}); twelve Transformer configurations based on Reformer, Informer, and Autoformer \cite{ref4,ref5,ref6}; Moirai, Moirai 2, and Moirai-MoE; their three VaR-aware adaptations; and four GARCH-/Wavelet--Autoformer hybrids. Five configurations fail the Sanity Gate and are excluded from MCDM ranking. Tier 1 denotes large foundation models, Tier 2 denotes parameter-efficient adaptations, and Tier 3 denotes unadapted baseline architectures.
+The source contains 1,322,330 daily prediction rows covering VN-Index, VN30, KOSPI, Nikkei 225, DAX 40, Euronext 100, IBEX 35, SMI, and S\&P 500 at horizons $\{1, 3, 5, 10, 21\}$. Because horizon targets overlap across adjacent origins, these rows are not independent observations; the primary unit for aggregate inference is the market--horizon block (45 blocks), with configuration comparisons made within common evaluation periods where available. The 26 configurations form 1,170 configuration--market--horizon blocks. Competitors include four GARCH-family models (including FI-GARCH \cite{ref3}); twelve Transformer configurations based on Reformer, Informer, and Autoformer \cite{ref4,ref5,ref6}; Moirai, Moirai 2, and Moirai-MoE; their VaR-aware adaptations; and four GARCH-/Wavelet--Autoformer hybrids. Five configurations fail the Sanity Gate and are excluded from MCDM ranking. The reported tiers describe the implementation groups in the stored results: Tier 1 is the miniaturized configuration, Tier 2 is the standard configuration, and Tier 3 is the large configuration.
 
 \subsection{Implementation Details}
-The dataset is split chronologically into training (70\%), validation (10\%), and testing (20\%) sets per market without look-ahead overlap. The primary experiment evaluates head-only adaptation at $\lambda_{\text{VaR}} = 0.2$, leaving the foundation backbone frozen. Omnibus Friedman tests across the 45 market--horizon blocks confirm statistically significant differences in point accuracy among configurations ($p < 10^{-150}$). SAW and TOPSIS then aggregate these heterogeneous performances into a policy-aware composite score.
+The data are split chronologically by market, but the saved prediction files use market-specific train/validation/test counts rather than a common 70/10/20 proportion. We therefore report the actual period and sample count for each market in the supplementary material and do not interpret rows from different model families as identical test observations. The primary experiment evaluates head-only adaptation with the backbone frozen. The stored sensitivity files cover $\lambda_{\text{VaR}}\in\{0.2,0.3,0.4,0.5\}$; they do not constitute a complete grid over all possible risk weights. Omnibus tests and MCDM summaries are reported as descriptive cross-block analyses, with paired raw losses and risk diagnostics receiving priority.
 
 \subsection{Main Rankings and Pareto Compromise}
-Figure \ref{fig2} illustrates the accuracy--tail trade-off for the representative configurations. Moirai 2 anchors the accuracy extreme (lowest MSE), while GJR--GARCH anchors the pass-rate extreme (highest PR). MoiraiVaR--Moirai-MoE occupies a non-dominated interior position on this Pareto frontier: no evaluated configuration attains both lower point loss and higher averaged VaR pass rate.
+Figure \ref{fig2} illustrates the accuracy--tail trade-off for the eligible configurations. Moirai 2 anchors the accuracy extreme (lowest MSE), while GJR--GARCH anchors the pass-rate extreme in the stored MCDM summary. MoiraiVaR--Moirai-MoE is an interior compromise in this projection; this does not imply that it dominates GARCH on standalone VaR loss or that it is optimal for every risk construction.
 
 \begin{table}[h]
 \centering
@@ -124,11 +129,11 @@ Moirai & 5 & 6 & 4 & 8 \\
 \end{tabular}
 \end{table}
 
-Table \ref{tab1} reports the top five eligible configurations. Under 50:50, MoiraiVaR--Moirai-MoE obtains SAW 0.8426 and TOPSIS 0.8401, ranking first by both methods. Under 30:70, it remains first. MCDM therefore shows that this Pareto compromise point is the preferred choice under both a balanced and a risk-priority preference specification.
+Table \ref{tab1} reports the top five eligible configurations. Under the stored 50:50 and 30:70 policies, MoiraiVaR--Moirai-MoE obtains the first composite rank by both methods. This is a preference-dependent summary: it identifies a compromise under these two weight policies and is not a claim of metric-wise dominance.
 
 SAW and TOPSIS remain closely aligned: Spearman rank correlation is 0.981 ($p = 6.84 \times 10^{-15}$) under 50:50 and 0.877 ($p = 1.87 \times 10^{-7}$) under 30:70. The winner is therefore unchanged even though several lower-ranked candidates move substantially when risk receives more weight.
 
-The winner is a compromise rather than a metric-wise dominator. Table \ref{tab2} compares it with the strongest pure-accuracy and pure-pass-rate alternatives. Moirai 2 has the lowest MSE, MAE, and QLIKE, and the highest tracking correlation. GJR--GARCH has the highest 1\% and 5\% VaR pass rates. MoiraiVaR--Moirai-MoE remains near the top of the accuracy criteria while improving the 5\% pass rate relative to the unadapted Moirai-MoE from 0.304 to 0.393. Its 1\% and 5\% absolute violation errors also decline from 0.00829 to 0.00786 and from 0.01036 to 0.01008.
+The winner is a compromise rather than a metric-wise dominator. Table \ref{tab2} compares it with the strongest pure-accuracy and pure-pass-rate alternatives under the stored evaluation. Moirai 2 has the lowest MSE, MAE, and QLIKE, while GJR--GARCH has the strongest reported pass-rate values. MoiraiVaR--Moirai-MoE remains close to the neural accuracy baselines and improves the stored 5\% pass-rate summary relative to Moirai-MoE from 0.304 to 0.393. These pass-rate differences should be read together with empirical violation rates and quantile loss; a non-rejected backtest is not itself a calibration score.
 
 \begin{table}[h]
 \centering
@@ -152,7 +157,7 @@ The SAW score decomposition makes the balance explicit. Under 50:50, MoiraiVaR--
 \begin{figure}[t]
 \centering
 \includegraphics[width=\textwidth]{fig_accuracy_risk_pareto.png}
-\caption{Accuracy--Risk Pareto frontier for representative configurations. Moirai 2 anchors the point-accuracy extreme (lowest MSE), while GJR--GARCH anchors the VaR calibration extreme (highest 5\% pass rate). MoiraiVaR--Moirai-MoE occupies a non-dominated interior compromise position. Configurations strictly inside the curve are Pareto-dominated.}
+\caption{Accuracy--Risk Pareto map for all 21 configurations that pass the Forecast Sanity Gate. Each point is one eligible configuration; red diamonds identify the three Pareto non-dominated points and blue circles identify dominated points. Moirai 2 anchors the point-accuracy extreme, while GJR--GARCH anchors the VaR calibration extreme in the stored MCDM summary.}
 \label{fig2}
 \end{figure}
 
@@ -162,19 +167,20 @@ MoiraiVaR--Moirai-MoE remains first by both methods at accuracy weights 0.30, 0.
 Tail-model sensitivity is stronger. Under Normal-only criteria, FI-GARCH is the consensus winner; under Student-$t$-only criteria, GARCH--Autoformer Tier 2 ranks first; and under FHS-only risk priority, GJR--GARCH ranks first. For MoiraiVaR--Moirai-MoE itself, the 1\% pass rates are 0.556, 0.156, and 0.200 for FHS, Normal, and Student-$t$. At 5\%, they are 0.511, 0.578, and 0.089. The averaged primary analysis rewards a configuration that performs comparatively well across these conflicting constructions, but it does not imply invariance to the choice of tail model.
 
 \section{Discussion and Limitations}
-The main result supports a specific form of risk-aware transfer. Rather than finding a universally superior forecast, the VaR-aware objective shifts the model along the Pareto frontier, trading modest accuracy gaps (a 2.0\% MSE increase relative to Moirai-MoE) for improved average VaR calibration. Reporting these positions explicitly prevents a single composite rank from obscuring the raw trade-off.
+The main result supports a specific form of risk-aware transfer. Rather than finding a universally superior forecast, the VaR-aware objective shifts each backbone along an accuracy--risk trade-off. The paired stored results show that the direction and size of the change depend on the backbone and $\lambda$: VaR quantile loss generally improves modestly, while multi-horizon volatility MSE can improve or worsen. This paired interpretation preserves the contribution without attributing every gain to the VaR term itself.
 
 Several limitations bound these conclusions:
 \begin{itemize}
 \item \textbf{Low absolute pass rates.} The highest averaged 5\% pass rate remains below 60\%, indicating that no evaluated configuration achieves fully satisfactory practical VaR calibration.
-\item \textbf{Rescaling baseline.} We did not ablate against a post-hoc scalar-tuned baseline $\hat{\sigma} \times c$; future work must verify whether the improvements stem from learned representations or simple scale inflation.
-\item \textbf{Unscaled quantile thresholds.} The evaluation applies standard Student-$t$ quantiles without the $\sqrt{\nu/(\nu - 2)}$ variance scale factor, yielding conservative thresholds that depress pass rates for heavy-tailed predictions.
-\item \textbf{Temporal leakage risk.} The dataset lacks strict purging/embargo periods between the chronological splits, potentially leaking forward information.
-\item \textbf{Missing baselines.} Econometric baselines such as HAR-RV and EWMA/RiskMetrics were not included.
+\item \textbf{Rescaling control.} The stored experiments do not include the scalar-rescaling null $\hat{\sigma}\times c$. Therefore the results cannot distinguish a learned tail representation from a pure post-hoc scale adjustment; this is a limitation of causal attribution, not evidence that the VaR term is uniquely responsible for every gain.
+\item \textbf{Student-$t$ implementation.} The corrected standardized quantile is given in the method section, but the stored training runs used the unstandardized threshold. Results are consequently reported as retrospective comparisons of the available outputs, and a fully corrected training ablation remains future work.
+\item \textbf{Temporal dependence.} Horizon targets overlap across origins and the saved splits do not use a strict purging/embargo procedure. Statistical evidence is therefore summarized at the block level rather than by treating all rows as independent.
+\item \textbf{Baseline coverage.} HAR-RV, EWMA/RiskMetrics, CAViaR, and joint VaR--ES models are important extensions. The present study retains GARCH-family baselines and should not be read as a complete comparison with all classical VaR models.
+\item \textbf{Backbone and weight coverage.} The stored sweep covers four nonzero $\lambda$ values and does not trace the complete $\lambda$ frontier or compare it with a scalar-rescaling frontier.
 \end{itemize}
 
 \section{Conclusion}
-MoiraiVaR connects a pretrained time-series foundation model to financial tail-risk requirements through a VaR-aware joint objective. Extensive multi-distribution evaluation confirms that MoiraiVaR--Moirai-MoE provides the most robust, distribution-averaged compromise for financial risk management, ranking first by both SAW and TOPSIS across balanced and risk-priority policies.
+MoiraiVaR studies how a VaR-aware objective changes frozen-backbone Moirai head adaptation for volatility forecasting. The stored experiments support a qualified conclusion: relative to the corresponding MSE-only neural heads, VaR-aware variants generally deliver modest improvements in tail quantile loss, with heterogeneous effects on multi-horizon volatility accuracy. GARCH models remain strong standalone VaR baselines, while MoiraiVaR--Moirai2 at intermediate values of $\lambda$ provides a competitive accuracy--risk compromise within the neural family. Composite SAW and TOPSIS rankings are consistent with this interpretation but remain preference-dependent summaries rather than evidence of universal superiority.
 
 \subsubsection{AI Disclosure.} Generative AI assisted with manuscript organization and language editing; the authors verified the research design, results, claims, and references.
 
@@ -229,6 +235,27 @@ Hwang, C.L., Yoon, K.: Multiple Attribute Decision Making: Methods and Applicati
 
 \bibitem{ref16}
 Behzadian, M., Otaghsara, S.K., Yazdani, M., Ignatius, J.: A state-of-the-art survey of TOPSIS applications. Expert Syst. Appl. \textbf{39}(17), 13051--13069 (2012).
+
+\bibitem{ref17}
+Engle, R.F., Manganelli, S.: CAViaR: Conditional autoregressive value at risk by regression quantiles. Econometrica \textbf{72}(6), 1749--1786 (2004).
+
+\bibitem{ref18}
+Corsi, F.: A simple approximate long-memory model of realized volatility. J. Financ. Econom. \textbf{7}(2), 174--196 (2009).
+
+\bibitem{ref19}
+Glosten, L.R., Jagannathan, R., Runkle, D.E.: On the relation between the expected value and the volatility of the nominal excess return on stocks. J. Finance \textbf{48}(5), 1779--1801 (1993).
+
+\bibitem{ref20}
+Zeng, A., Chen, M., Zhang, L., Xu, Q.: Are Transformers effective for time series forecasting? In: Proceedings of the AAAI Conference on Artificial Intelligence, vol. 37, pp. 11121--11128 (2023).
+
+\bibitem{ref21}
+Ansari, A.F., et al.: Chronos: Learning the language of time series. Transactions on Machine Learning Research (2024).
+
+\bibitem{ref22}
+Das, A., Kong, W., Sen, R., Zhou, Y.: A decoder-only foundation model for time-series forecasting. arXiv preprint arXiv:2310.10688 (2023).
+
+\bibitem{ref23}
+Rasul, K., et al.: Lag-Llama: Towards foundation models for time series forecasting. In: International Conference on Learning Representations (2024).
 
 \end{thebibliography}
 \end{document}
