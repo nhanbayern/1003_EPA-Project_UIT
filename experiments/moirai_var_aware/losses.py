@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import torch
 import torch.nn as nn
@@ -16,7 +17,10 @@ def _normal_ppf(alpha: float, *, device: torch.device, dtype: torch.dtype) -> to
 def _student_t_ppf(alpha: float, nu: float, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     from scipy import stats
 
-    return torch.tensor(float(stats.t.ppf(alpha, df=nu)), device=device, dtype=dtype)
+    if nu <= 2.0:
+        raise ValueError("Student-t standard deviation requires nu > 2")
+    scale_factor = math.sqrt((nu - 2.0) / nu)
+    return torch.tensor(float(stats.t.ppf(alpha, df=nu)) * scale_factor, device=device, dtype=dtype)
 
 
 @dataclass(frozen=True)
@@ -88,4 +92,3 @@ class VarAwareVolatilityLoss(nn.Module):
             "volatility_loss": vol_loss.detach(),
             "var_quantile_loss": q_loss.detach(),
         }
-
