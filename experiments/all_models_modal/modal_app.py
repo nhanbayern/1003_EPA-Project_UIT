@@ -258,6 +258,12 @@ def _prepare_notebook(source: Path, destination: Path, output_dir: Path, smoke_t
             text = text.replace("EPOCHS = 30", "EPOCHS = 1")
             text = text.replace("EPOCHS = 50", "EPOCHS = 1")
             text = text.replace("EPOCHS=50", "EPOCHS=1")
+            # GARCH imports its epoch count from config.py rather than
+            # defining a literal in the notebook.
+            text = text.replace(
+                "from config import DEFAULT_SEQ_LEN, DEFAULT_VOL_WINDOW, HORIZONS, BATCH_SIZE, EPOCHS, LR, DEVICE, FIXED_SPLITS",
+                "from config import DEFAULT_SEQ_LEN, DEFAULT_VOL_WINDOW, HORIZONS, BATCH_SIZE, EPOCHS, LR, DEVICE, FIXED_SPLITS\nEPOCHS = 1",
+            )
             text = text.replace("epochs=30", "epochs=1")
             text = text.replace(
                 "LAMBDA_VARS = [0.0, 0.05, 0.1, 0.2, 0.5, 1.0]",
