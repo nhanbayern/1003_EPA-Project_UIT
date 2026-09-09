@@ -93,8 +93,8 @@ def run_training_to_zip(
             )
             val_preds, val_targets = predict(model, val_loader, device=device)
             preds, targets = predict(model, test_loader, device=device)
-            val_frame = build_prediction_frame(index_name, model_type, lambda_var, val_ds, val_preds, val_targets, tuning_mode=tuning_mode, split="validation")
-            frame = build_prediction_frame(index_name, model_type, lambda_var, test_ds, preds, targets, tuning_mode=tuning_mode, split="test")
+            val_frame = build_prediction_frame(index_name, model_type, lambda_var, val_ds, val_preds, val_targets, tuning_mode=tuning_mode, split="validation", nu=dynamic_nu)
+            frame = build_prediction_frame(index_name, model_type, lambda_var, test_ds, preds, targets, tuning_mode=tuning_mode, split="test", nu=dynamic_nu)
             mode_suffix = "" if tuning_mode == "head" else f"_{tuning_mode}"
             filename = f"{index_name}_{model_type}{mode_suffix}_lambda_{lambda_var:g}_predictions.csv"
             csv_outputs[filename] = frame.to_csv(index=False)

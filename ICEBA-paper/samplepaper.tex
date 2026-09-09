@@ -175,7 +175,7 @@ Several limitations bound these conclusions:
 \item \textbf{Rescaling control.} The stored experiments do not include the scalar-rescaling null $\hat{\sigma}\times c$. Therefore the results cannot distinguish a learned tail representation from a pure post-hoc scale adjustment; this is a limitation of causal attribution, not evidence that the VaR term is uniquely responsible for every gain.
 \item \textbf{Student-$t$ implementation.} The corrected standardized quantile is given in the method section, but the stored training runs used the unstandardized threshold. Results are consequently reported as retrospective comparisons of the available outputs, and a fully corrected training ablation remains future work.
 \item \textbf{Temporal dependence.} Horizon targets overlap across origins and the saved splits do not use a strict purging/embargo procedure. Statistical evidence is therefore summarized at the block level rather than by treating all rows as independent.
-\item \textbf{Baseline coverage.} HAR-RV, EWMA/RiskMetrics, CAViaR, and joint VaR--ES models are important extensions. The present study retains GARCH-family baselines and should not be read as a complete comparison with all classical VaR models.
+\item \textbf{Baseline coverage.} HAR-RV \cite{ref18}, EWMA/RiskMetrics, CAViaR \cite{ref17}, and joint VaR--ES models \cite{ref24} are important extensions. The present study retains GARCH-family baselines and should not be read as a complete comparison with all classical VaR models.
 \item \textbf{Backbone and weight coverage.} The stored sweep covers four nonzero $\lambda$ values and does not trace the complete $\lambda$ frontier or compare it with a scalar-rescaling frontier.
 \end{itemize}
 
@@ -256,6 +256,9 @@ Das, A., Kong, W., Sen, R., Zhou, Y.: A decoder-only foundation model for time-s
 
 \bibitem{ref23}
 Rasul, K., et al.: Lag-Llama: Towards foundation models for time series forecasting. In: International Conference on Learning Representations (2024).
+
+\bibitem{ref24}
+Taylor, J.W.: Forecasting Value-at-Risk and Expected Shortfall using a semiparametric approach based on the asymmetric Laplace distribution. J. Bus. Econ. Stat. \textbf{37}(1), 121--133 (2019).
 
 \end{thebibliography}
 \end{document}
