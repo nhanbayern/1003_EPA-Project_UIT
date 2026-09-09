@@ -5,7 +5,7 @@ import pandas as pd
 from .config import HORIZONS
 
 
-def build_prediction_frame(index_name, model_type, lambda_var, test_ds, preds, targets, tuning_mode: str = "head") -> pd.DataFrame:
+def build_prediction_frame(index_name, model_type, lambda_var, test_ds, preds, targets, tuning_mode: str = "head", split: str = "test") -> pd.DataFrame:
     rows = []
     full_ds = test_ds.dataset
     branch = "Moirai_VAR" if tuning_mode == "head" else "Moirai_VAR_FT"
@@ -19,11 +19,13 @@ def build_prediction_frame(index_name, model_type, lambda_var, test_ds, preds, t
                     "branch": branch,
                     "tier": tier,
                     "model": model_type,
+                    "lambda_var": lambda_var,
                     "time": sample["time"],
                     "horizon": horizon,
                     "log_return": sample["log_return"],
                     "true_volatility": targets[k, h_idx],
                     "predict_volatility": preds[k, h_idx],
+                    "split": split,
                 }
             )
     return pd.DataFrame(rows)

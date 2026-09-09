@@ -33,6 +33,15 @@ experiments/moirai_var_aware/
 
 ## Modal Setup
 
+To reproduce the reviewer ablation (including validation/test exports), run the full lambda sweep:
+
+```powershell
+py -3.11 -m modal run experiments/moirai_var_aware/modal_app.py --lambda-sweep 0,0.05,0.1,0.2,0.5,1.0 --epochs 30 --models moirai2 --datasets VN_INDEX
+py -3.11 experiments/moirai_var_aware/evaluate_lambda_sweep.py --input-dir output/modal_moirai_var_loss --output-dir output/lambda_ablation
+```
+
+The evaluator tunes the scalar factor on validation for the `lambda=0` forecast and reports its untouched test performance against every trained lambda value.
+
 ```powershell
 py -3.11 -m pip install modal
 py -3.11 -m modal setup
@@ -125,4 +134,3 @@ Full fine-tune nen lam co chon loc vi ton GPU hon:
 py -3.11 -m modal run experiments/moirai_var_aware/modal_app.py --tuning-mode full --lambda-var 0.0 --epochs 30 --batch-size 8 --models moirai2
 py -3.11 -m modal run experiments/moirai_var_aware/modal_app.py --tuning-mode full --lambda-var 0.2 --epochs 30 --batch-size 8 --models moirai2
 ```
-
