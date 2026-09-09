@@ -184,6 +184,7 @@ for tier_name, config in TIERS_CONFIG.items():
             n_val = int(N * 0.2)
             n_test = N - n_train - n_val
             
+        train_returns = df['log_return'].iloc[:n_train].values
         print("Fitting GJR-GARCH model on training split...")
         am = arch_model(train_returns, vol='Garch', p=1, o=1, q=1, rescale=False)
         res = am.fit(disp='off')
