@@ -23,7 +23,7 @@ class VolatilityDataset(Dataset):
         self.garch_params = garch_params
         
         self.valid_indices = []
-        for t in range(lookback, len(self.returns) - horizon + 1):
+        for t in range(lookback - 1, len(self.returns) - horizon):
             self.valid_indices.append(t)
             
     def __len__(self):
@@ -33,13 +33,13 @@ class VolatilityDataset(Dataset):
         t = self.valid_indices[idx]
         
         # x is the standardized residuals
-        x = self.garch_z[t - self.lookback : t]
+        x = self.garch_z[t - self.lookback + 1 : t + 1]
         
         y_vol = np.array([
-            np.sqrt(np.mean(self.returns[t : t + h] ** 2))
+            np.std(self.returns[t + h - self.lookback : t + h], ddof=0)
             for h in range(1, self.horizon + 1)
         ], dtype=np.float32)
-        y_ret = self.returns[t : t + self.horizon]
+        y_ret = self.returns[t + 1 : t + self.horizon + 1]
         
         # Multi-step GARCH forecast
         garch_vol_forecasts = []

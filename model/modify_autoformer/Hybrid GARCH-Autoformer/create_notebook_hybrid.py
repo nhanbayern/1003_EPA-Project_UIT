@@ -23,7 +23,6 @@ import torch
 from torch.utils.data import DataLoader
 from dataset import VolatilityDataset
 from models import HybridGARCHAutoformer
-from utils import calculate_fixed_nu, StudentTNLLLoss
 from config import TIERS_CONFIG
 import glob
 from pathlib import Path
@@ -57,8 +56,10 @@ SPLITS = {
 
 # Cell 4: Train Function
 cells.append(new_code_cell("""\
-def train_model(model, train_loader, val_loader, nu):
-    criterion = StudentTNLLLoss(nu=nu)
+def train_model(model, train_loader, val_loader):
+    # Baseline target is rolling volatility; optimize the same MSE reported
+    # for the point-forecast comparison.
+    criterion = torch.nn.MSELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     best_val_loss = float('inf')
     patience = 5
@@ -67,11 +68,11 @@ def train_model(model, train_loader, val_loader, nu):
     
     for epoch in range(EPOCHS):
         model.train()
-        for x, y_garch, _, y_ret, _ in train_loader:
-            x, y_garch, y_ret = x.to(DEVICE), y_garch.to(DEVICE), y_ret.to(DEVICE)
+        for x, y_garch, y_vol, _, _ in train_loader:
+            x, y_garch, y_vol = x.to(DEVICE), y_garch.to(DEVICE), y_vol.to(DEVICE)
             optimizer.zero_grad()
             pred_vol = model(x, y_garch)
-            loss = criterion(pred_vol, y_ret)
+            loss = criterion(pred_vol, y_vol)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -79,10 +80,10 @@ def train_model(model, train_loader, val_loader, nu):
         model.eval()
         val_loss = 0
         with torch.no_grad():
-            for x, y_garch, _, y_ret, _ in val_loader:
-                x, y_garch, y_ret = x.to(DEVICE), y_garch.to(DEVICE), y_ret.to(DEVICE)
+            for x, y_garch, y_vol, _, _ in val_loader:
+                x, y_garch, y_vol = x.to(DEVICE), y_garch.to(DEVICE), y_vol.to(DEVICE)
                 pred_vol = model(x, y_garch)
-                val_loss += criterion(pred_vol, y_ret).item()
+                val_loss += criterion(pred_vol, y_vol).item()
                 
         val_loss /= len(val_loader)
         
@@ -123,9 +124,8 @@ def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name)
                 
                 for j, h in enumerate(HORIZONS):
                     idx = EVAL_INDICES[j]
-                    origin_t = t - 1
-                    origin_time = df['time'].iloc[origin_t] if origin_t >= 0 else None
-                    next_return = df['log_return'].iloc[t] if t < len(df) else None
+                    origin_time = df['time'].iloc[t] if t < len(df) else None
+                    next_return = df['log_return'].iloc[t + 1] if t + 1 < len(df) else None
                     
                     if origin_time is not None:
                         results.append({
@@ -184,9 +184,6 @@ for tier_name, config in TIERS_CONFIG.items():
             n_val = int(N * 0.2)
             n_test = N - n_train - n_val
             
-        train_returns = df['log_return'].iloc[:n_train].values
-        nu = calculate_fixed_nu(train_returns)
-        
         print("Fitting GJR-GARCH model on training split...")
         am = arch_model(train_returns, vol='Garch', p=1, o=1, q=1, rescale=False)
         res = am.fit(disp='off')
@@ -223,7 +220,7 @@ for tier_name, config in TIERS_CONFIG.items():
         
         print(f'Training {m_name}...')
         model.to(DEVICE)
-        model = train_model(model, train_loader, val_loader, nu)
+        model = train_model(model, train_loader, val_loader)
         
         weight_dir = f'/kaggle/working/results_hybrid/models_weights/{tier_name}'
         os.makedirs(weight_dir, exist_ok=True)

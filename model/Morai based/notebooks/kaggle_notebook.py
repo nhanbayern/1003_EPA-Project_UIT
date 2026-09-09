@@ -58,8 +58,7 @@ class VolatilityDataset(Dataset):
         self.times = df['time'].values
 
         # Chi tao mau tu 2010-01-01 tro di (truoc 2010 la burn-in).
-        # `time` is the forecast origin t; every target is strictly future
-        # realized RMS volatility, matching experiments/moirai_var_aware/data.py.
+        # `time` is the forecast origin t; targets follow samplepaper.tex.
         self.valid_indices = df[df['time'] >= '2010-01-01'].index.tolist()
         self.samples = []
         n = len(self.returns)
@@ -72,9 +71,8 @@ class VolatilityDataset(Dataset):
             x = self.returns[t - lookback + 1: t + 1]
             y = []
             for h in horizons:
-                # h-day realized RMS volatility from returns not observable at t.
-                future_returns = self.returns[t + 1: t + h + 1]
-                y.append(np.sqrt(np.mean(future_returns ** 2)))
+                target_window = self.returns[t + h - lookback: t + h]
+                y.append(np.std(target_window, ddof=0))
             self.samples.append({
                 'x': torch.tensor(x, dtype=torch.float32),
                 'y': torch.tensor(y, dtype=torch.float32),

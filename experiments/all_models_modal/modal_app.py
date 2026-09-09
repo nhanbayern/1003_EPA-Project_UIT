@@ -192,8 +192,16 @@ def _normalize_predictions(output_dir: Path) -> None:
         })
         normalized.to_csv(destination / f"Moirai_{dataset}_{model}_predictions.csv", index=False)
 
+    # MoiraiVaR emits native rows with its branch/tier already populated.
+    # _prepare_notebook writes those rows beside its ZIP archive so they are
+    # treated identically to every other family during normalization.
+    for csv_file in (output_dir / "moiraivar" / "predictions").glob("*_predictions.csv"):
+        frame = pd.read_csv(csv_file)
+        normalized = frame.reindex(columns=STANDARD_COLUMNS)
+        normalized.to_csv(destination / f"MoiraiVaR_{csv_file.name}", index=False)
 
-def _prepare_notebook(source: Path, destination: Path, output_dir: Path, smoke_test: bool = False) -> None:
+
+def _prepare_notebook(source: Path, destination: Path, output_dir: Path, smoke_test: bool = False, lambda_sweep: str = "0,0.05,0.1,0.2,0.5,1") -> None:
     """Make the committed Kaggle notebook portable without altering its source file."""
     import nbformat
 
@@ -222,20 +230,49 @@ def _prepare_notebook(source: Path, destination: Path, output_dir: Path, smoke_t
         # The baseline notebook's Kaggle path contains a duplicated `weights`
         # component; the Modal mount is already the weights directory itself.
         text = text.replace("/root/weights/weights", "/root/weights")
+        # The MoiraiVaR notebook is the official reviewer ablation.  Keep its
+        # grid explicit in the prepared artifact, independent of stale Kaggle
+        # notebook defaults.
+        text = text.replace(
+            "LAMBDA_VARS = [0.0, 0.05, 0.1, 0.2, 0.5, 1.0]",
+            f"LAMBDA_VARS = {[float(value.strip()) for value in lambda_sweep.split(',') if value.strip()]}",
+        )
+        # Legacy notebooks are mounted as immutable inputs.  Rewrite their
+        # embedded target/export cells so every Modal family uses the rolling
+        # 60-day target declared in ICEBA-paper/samplepaper.tex.
+        text = text.replace(
+            "future_returns = self.returns[t + 1: t + h + 1]\n                y.append(np.sqrt(np.mean(future_returns ** 2)))",
+            "target_window = self.returns[t + h - lookback: t + h]\n                y.append(np.std(target_window, ddof=0))",
+        )
+        text = text.replace("origin_t = t - 1\n                    origin_time = df['time'].iloc[origin_t] if origin_t >= 0 else None\n                    next_return = df['log_return'].iloc[t] if t < len(df) else None",
+                            "origin_time = df['time'].iloc[t] if t < len(df) else None\n                    next_return = df['log_return'].iloc[t + 1] if t + 1 < len(df) else None")
+        text = text.replace("origin_times, stat_test_r, pred_dir)",
+                            "origin_times, stat_test_r, pred_dir, history_returns=stat_train_r)")
+        text = text.replace("hybrid_origin_times, hybrid_future_returns, pred_dir)",
+                            "hybrid_origin_times, hybrid_future_returns, pred_dir, history_returns=test_r.iloc[:DEFAULT_SEQ_LEN])")
         if smoke_test:
             text = text.replace("for index_name in SPLIT_INFO.keys():", "for index_name in list(SPLIT_INFO.keys())[:1]:")
             # Some statistical notebooks enumerate raw dataset files instead
             # of SPLIT_INFO; keep smoke runs to one market in that path too.
             text = text.replace("for csv_file in csv_files:", "for csv_file in csv_files[:1]:")
             text = text.replace("EPOCHS = 30", "EPOCHS = 1")
+            text = text.replace("EPOCHS = 50", "EPOCHS = 1")
             text = text.replace("epochs=30", "epochs=1")
+            text = text.replace(
+                "LAMBDA_VARS = [0.0, 0.05, 0.1, 0.2, 0.5, 1.0]",
+                "LAMBDA_VARS = [0.0, 0.2]",
+            )
+            text = text.replace(
+                f"LAMBDA_VARS = {[float(value.strip()) for value in lambda_sweep.split(',') if value.strip()]}",
+                "LAMBDA_VARS = [0.0, 0.2]",
+            )
             text = text.replace("for epoch in range(EPOCHS):", "for epoch in range(min(EPOCHS, 1)):")
         # Preserve trained MoiraiVaR state dicts, which the original notebook only exported as CSV.
         marker = "csv_outputs[filename] = frame.to_csv(index=False)"
         if marker in text:
             text = text.replace(
                 marker,
-                marker + "\n            weights_path = f'/root/modal_output/moiraivar/weights/{index_name}_{model_type}{mode_suffix}_lambda_{lambda_var:g}.pt'\n            os.makedirs(os.path.dirname(weights_path), exist_ok=True)\n            torch.save(model.state_dict(), weights_path)",
+                marker + "\n            prediction_path = f'/root/modal_output/moiraivar/predictions/{filename}'\n            os.makedirs(os.path.dirname(prediction_path), exist_ok=True)\n            frame.to_csv(prediction_path, index=False)\n            validation_filename = filename.replace('_predictions.csv', '_validation_predictions.csv')\n            val_frame.to_csv(f'/root/modal_output/moiraivar/predictions/{validation_filename}', index=False)\n            weights_path = f'/root/modal_output/moiraivar/weights/{index_name}_{model_type}{mode_suffix}_lambda_{lambda_var:g}.pt'\n            os.makedirs(os.path.dirname(weights_path), exist_ok=True)\n            torch.save(model.state_dict(), weights_path)",
             )
         baseline_marker = "df_out.to_csv(csv_filename, index=False)"
         if baseline_marker in text:
@@ -282,7 +319,7 @@ def _prepare_notebook(source: Path, destination: Path, output_dir: Path, smoke_t
 
 
 @app.function(image=image, gpu="A10G", timeout=60 * 60 * 8, volumes={"/root/persist": artifact_volume})
-def run_selected(families: list[str], smoke_test: bool = False, run_id: str = "latest") -> bytes:
+def run_selected(families: list[str], smoke_test: bool = False, run_id: str = "latest", lambda_sweep: str = "0,0.05,0.1,0.2,0.5,1") -> bytes:
     import os
     import sys
     import time
@@ -344,7 +381,7 @@ def run_selected(families: list[str], smoke_test: bool = False, run_id: str = "l
         reporter.begin(family)
         source = Path("/root/project") / NOTEBOOKS[family]
         prepared = Path("/root/prepared_notebooks") / f"{family}.ipynb"
-        _prepare_notebook(source, prepared, output_dir, smoke_test=smoke_test)
+        _prepare_notebook(source, prepared, output_dir, smoke_test=smoke_test, lambda_sweep=lambda_sweep)
         # The legacy notebooks use generic module names (dataset, models,
         # config, utils).  Remove the preceding family's modules before
         # executing the next notebook, otherwise Transformer imports GARCH's
@@ -363,17 +400,26 @@ def run_selected(families: list[str], smoke_test: bool = False, run_id: str = "l
                 continue
             reporter.cell(cell_number, len(notebook.cells))
             exec(compile(cell.source, f"{prepared}:cell-{cell_number}", "exec"), namespace)
+        if family == "moiraivar":
+            from experiments.moirai_var_aware.evaluate_lambda_sweep import evaluate_lambda_sweep
+            ablation_dir = output_dir / "moiraivar" / "lambda_ablation"
+            if ablation_dir.exists():
+                import shutil
+                shutil.rmtree(ablation_dir)
+            evaluate_lambda_sweep(output_dir / "moiraivar" / "predictions", ablation_dir)
         reporter.done(family)
-    _normalize_predictions(output_dir)
-
-    # Persist large model weights outside the function return payload. Returning
-    # all Moirai state dicts from one BytesIO can exceed container memory.
-    import shutil
-    persistent_run = Path("/root/persist") / run_id
-    if persistent_run.exists():
-        shutil.rmtree(persistent_run)
-    shutil.copytree(output_dir, persistent_run)
-    artifact_volume.commit()
+        # Publish immediately after this family's CSV artifacts exist.  This
+        # checkpoint survives failures in later families and makes completed
+        # normalized predictions visible on the Volume without waiting for the
+        # local entrypoint to collect every remote call.
+        _normalize_predictions(output_dir)
+        import shutil
+        persistent_run = Path("/root/persist") / run_id
+        if persistent_run.exists():
+            shutil.rmtree(persistent_run)
+        shutil.copytree(output_dir, persistent_run)
+        artifact_volume.commit()
+        print(f"published to Modal Volume: {persistent_run}")
 
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -386,7 +432,7 @@ def run_selected(families: list[str], smoke_test: bool = False, run_id: str = "l
 
 
 @app.local_entrypoint()
-def main(families: str = "garch,transformer,moiraivar", output_dir: str = "output", smoke_test: bool = False):
+def main(families: str = "garch,transformer,moirai,moiraivar,hybrid,wavelet", output_dir: str = "output", smoke_test: bool = False, lambda_sweep: str = "0,0.05,0.1,0.2,0.5,1"):
     selected = [item.strip().lower() for item in families.split(",") if item.strip()]
     invalid = sorted(set(selected) - set(NOTEBOOKS))
     if invalid:
@@ -404,7 +450,7 @@ def main(families: str = "garch,transformer,moiraivar", output_dir: str = "outpu
     calls = {}
     for family in selected:
         print(f"starting Modal family in parallel: {family}")
-        calls[family] = run_selected.spawn([family], smoke_test=smoke_test, run_id=f"{timestamp}/{family}")
+        calls[family] = run_selected.spawn([family], smoke_test=smoke_test, run_id=f"{timestamp}/{family}", lambda_sweep=lambda_sweep)
 
     weight_paths = {
         # Legacy notebooks create a family-named results directory after the
@@ -441,7 +487,7 @@ def main(families: str = "garch,transformer,moiraivar", output_dir: str = "outpu
             if archive_path.exists():
                 archive_path.unlink()
     (local_run_dir / "run_manifest.txt").write_text(
-        f"families={','.join(selected)}\nmodal_app={APP_NAME}\ncreated_at={timestamp}\n",
+        f"families={','.join(selected)}\nlambda_sweep={lambda_sweep}\nmodal_app={APP_NAME}\ncreated_at={timestamp}\n",
         encoding="utf-8",
     )
     print(f"saved artifacts to {local_run_dir}")

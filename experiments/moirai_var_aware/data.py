@@ -9,7 +9,7 @@ from .config import HORIZONS, LOOKBACK, SPLIT_INFO
 
 
 class VolatilityDataset(Dataset):
-    """Causal windows with future h-day realized-volatility targets."""
+    """60-return contexts with offset 60-day rolling-volatility targets."""
 
     def __init__(self, df: pd.DataFrame, lookback: int = LOOKBACK, horizons: list[int] | None = None) -> None:
         self.lookback = lookback
@@ -36,8 +36,10 @@ class VolatilityDataset(Dataset):
             x = self.returns[t - lookback + 1 : t + 1]
             y = []
             for horizon in self.horizons:
-                future_returns = self.returns[t + 1 : t + horizon + 1]
-                y.append(np.sqrt(np.mean(future_returns ** 2)))
+                # samplepaper.tex: sd(r[t+h-60], ..., r[t+h-1]).  The
+                # exclusive slice endpoint is therefore t+h.
+                target_window = self.returns[t + horizon - lookback : t + horizon]
+                y.append(np.std(target_window, ddof=0))
             self.samples.append(
                 {
                     "x": torch.tensor(x, dtype=torch.float32),

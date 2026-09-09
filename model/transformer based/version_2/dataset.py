@@ -22,8 +22,8 @@ class VolatilityDataset(Dataset):
         self.horizon = horizon
         
         self.valid_indices = []
-        # t is the end of the lookback window
-        for t in range(lookback, len(self.returns) - horizon + 1):
+        # t is the final observed return in the 60-day context.
+        for t in range(lookback - 1, len(self.returns) - horizon):
             self.valid_indices.append(t)
             
     def __len__(self):
@@ -32,16 +32,15 @@ class VolatilityDataset(Dataset):
     def __getitem__(self, idx):
         t = self.valid_indices[idx]
         
-        # Input features: [t-lookback : t] (exclusive of t, so [t-60 : t])
-        x = self.returns[t - self.lookback : t]
+        # Input features: r[t-59:t+1].
+        x = self.returns[t - self.lookback + 1 : t + 1]
         
-        # At origin t-1, evaluate each h by realized RMS volatility over the
-        # next h unobserved returns.  This is the common MoiraiVaR target.
+        # samplepaper.tex: y[t,h] = sd(r[t+h-60], ..., r[t+h-1]).
         y_vol = np.array([
-            np.sqrt(np.mean(self.returns[t : t + h] ** 2))
+            np.std(self.returns[t + h - self.lookback : t + h], ddof=0)
             for h in range(1, self.horizon + 1)
         ], dtype=np.float32)
-        y_ret = self.returns[t : t + self.horizon]
+        y_ret = self.returns[t + 1 : t + self.horizon + 1]
         
         x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(-1) # [60, 1]
         y_vol_tensor = torch.tensor(y_vol, dtype=torch.float32) # [21]

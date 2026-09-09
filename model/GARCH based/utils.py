@@ -90,15 +90,18 @@ def get_split_indices(n_raw_samples, dataset_name):
     return train_cnt, train_cnt + val_cnt
 
 def save_predictions_csv(index_name, model_name, predictions_dict, origin_times,
-                         future_returns, out_dir):
+                         future_returns, out_dir, history_returns=None):
     """
     Save forecasts using the shared causal evaluation schema.  Each row is
-    indexed by forecast origin t and evaluates h-step prediction against the
-    realized RMS of returns r[t+1:t+h+1].
+    indexed by forecast origin t and evaluates against the offset 60-day
+    rolling standard deviation defined in ICEBA-paper/samplepaper.tex.
     """
     records = []
     horizons = sorted(list(predictions_dict.keys()))
     
+    history = np.asarray(history_returns if history_returns is not None else [], dtype=float)[-60:]
+    joined = np.concatenate([history, np.asarray(future_returns, dtype=float)])
+    history_len = len(history)
     for h in horizons:
         preds = predictions_dict[h]
         valid_len = min(len(preds) - h + 1, len(origin_times) - h + 1,
@@ -108,7 +111,14 @@ def save_predictions_csv(index_name, model_name, predictions_dict, origin_times,
             realized = np.asarray(future_returns.iloc[i:i + h]
                                   if isinstance(future_returns, pd.Series)
                                   else future_returns[i:i + h], dtype=float)
-            true_vol = np.sqrt(np.mean(realized ** 2)) if np.isfinite(realized).all() else np.nan
+            # The benchmark target is the offset 60-day rolling standard
+            # deviation, not the h-day realized RMS proxy.
+            # With a 60-return origin context ending at t, h=1 targets that
+            # same rolling window; larger h shift its endpoint by h-1.
+            target_end = history_len + i + h - 1
+            target_start = target_end - 60
+            target_window = joined[target_start:target_end]
+            true_vol = np.std(target_window, ddof=0) if len(target_window) == 60 and np.isfinite(target_window).all() else np.nan
             time_val = origin_times[i]
             log_ret = realized[0] if len(realized) else np.nan
             

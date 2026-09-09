@@ -161,7 +161,8 @@ else:
             
             origin_times = returns.index[val_end - 1: val_end - 1 + len(stat_test_r)]
             save_predictions_csv(index_name, stat_model_name, predictions,
-                                 origin_times, stat_test_r, pred_dir)
+                                 origin_times, stat_test_r, pred_dir,
+                                 history_returns=stat_train_r)
             plot_predictions(index_name, stat_model_name, predictions, stat_test_time, stat_test_v, viz_dir, horizon=21)
             
             param_df = pd.DataFrame(params)
@@ -183,7 +184,8 @@ else:
         hybrid_future_returns = test_r.iloc[DEFAULT_SEQ_LEN:]
         hybrid_origin_times = returns.index[val_end - 1: val_end - 1 + len(hybrid_future_returns)]
         save_predictions_csv(index_name, "GARCH-LSTM-Hybrid", lstm_predictions,
-                             hybrid_origin_times, hybrid_future_returns, pred_dir)
+                             hybrid_origin_times, hybrid_future_returns, pred_dir,
+                             history_returns=test_r.iloc[:DEFAULT_SEQ_LEN])
         plot_predictions(index_name, "GARCH-LSTM-Hybrid", lstm_predictions, test_time, test_v.iloc[DEFAULT_SEQ_LEN:], viz_dir, horizon=21)
 
 print('\\nALL TASKS DONE! Check /kaggle/working/results/')
