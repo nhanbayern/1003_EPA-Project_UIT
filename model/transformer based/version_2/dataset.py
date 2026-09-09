@@ -18,12 +18,6 @@ class VolatilityDataset(Dataset):
         self.returns = df['log_return'].fillna(0).values
         self.time = df['time'].values if 'time' in df.columns else np.arange(len(self.returns))
         
-        # Precompute rolling standard deviation using pandas to avoid O(N) in __getitem__
-        # pandas rolling window is inclusive of the current index, so rolling(60).std() at index t
-        # gives the std of [t-59: t+1], which exactly matches the lookback logic.
-        returns_series = pd.Series(self.returns)
-        self.rolling_std = returns_series.rolling(window=lookback).std().values
-        
         self.lookback = lookback
         self.horizon = horizon
         
@@ -41,9 +35,12 @@ class VolatilityDataset(Dataset):
         # Input features: [t-lookback : t] (exclusive of t, so [t-60 : t])
         x = self.returns[t - self.lookback : t]
         
-        # Target volatility and returns for horizon 1 to 21
-        # Precalculated rolling_std[t] corresponds to horizon 1, rolling_std[t+20] to horizon 21.
-        y_vol = self.rolling_std[t : t + self.horizon]
+        # At origin t-1, evaluate each h by realized RMS volatility over the
+        # next h unobserved returns.  This is the common MoiraiVaR target.
+        y_vol = np.array([
+            np.sqrt(np.mean(self.returns[t : t + h] ** 2))
+            for h in range(1, self.horizon + 1)
+        ], dtype=np.float32)
         y_ret = self.returns[t : t + self.horizon]
         
         x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(-1) # [60, 1]

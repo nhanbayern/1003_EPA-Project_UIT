@@ -87,11 +87,12 @@ claim that the VaR objective adds value unless it beats the rescaling baseline.
 
 ## Q11. What remains outside this code change?
 
-**A.** The Transformer, GARCH, and hybrid dataset builders are separate
-pipelines. They still require alignment with this target before their outputs
-can be compared scientifically. The statistical analysis pipeline also needs a
-verified train-only source for per-market `nu` rather than fitting it from the
-merged prediction file.
+**A.** The Transformer, GARCH, and hybrid dataset builders now implement the
+same causal target/export schema. Their existing CSV artifacts remain legacy:
+every compared family must be rerun and merged on verified common keys before
+scientific comparison. The statistical analysis pipeline also needs a verified
+train-only source for per-market `nu` rather than fitting it from the merged
+prediction file.
 
 ## Q12. What evidence should the auditor request?
 

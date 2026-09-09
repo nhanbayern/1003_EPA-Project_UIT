@@ -221,7 +221,9 @@ class VarBacktester:
 
     def var_threshold(self, predicted_volatility: np.ndarray, nu: float) -> np.ndarray:
         vol = np.maximum(np.asarray(predicted_volatility, dtype=float), self.epsilon)
-        q_alpha = stats.t.ppf(self.alpha, df=float(nu))
+        nu_value = float(nu)
+        scale_factor = np.sqrt((nu_value - 2.0) / nu_value) if nu_value > 2.0 else 1.0
+        q_alpha = stats.t.ppf(self.alpha, df=nu_value) * scale_factor
         return self.mu + vol * q_alpha
 
     def kupiec_test(self, violations) -> tuple[float, float, float]:

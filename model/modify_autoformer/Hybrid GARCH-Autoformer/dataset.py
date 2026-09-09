@@ -18,9 +18,6 @@ class VolatilityDataset(Dataset):
         self.garch_vol = df['garch_vol'].fillna(1e-6).values
         self.time = df['time'].values if 'time' in df.columns else np.arange(len(self.returns))
         
-        returns_series = pd.Series(self.returns)
-        self.rolling_std = returns_series.rolling(window=lookback).std().values
-        
         self.lookback = lookback
         self.horizon = horizon
         self.garch_params = garch_params
@@ -38,7 +35,10 @@ class VolatilityDataset(Dataset):
         # x is the standardized residuals
         x = self.garch_z[t - self.lookback : t]
         
-        y_vol = self.rolling_std[t : t + self.horizon]
+        y_vol = np.array([
+            np.sqrt(np.mean(self.returns[t : t + h] ** 2))
+            for h in range(1, self.horizon + 1)
+        ], dtype=np.float32)
         y_ret = self.returns[t : t + self.horizon]
         
         # Multi-step GARCH forecast

@@ -19,10 +19,6 @@ class VolatilityDataset(Dataset):
         self.returns = df['log_return'].fillna(0).values
         self.time = df['time'].values if 'time' in df.columns else np.arange(len(self.returns))
 
-        # Precompute rolling std as the target volatility proxy
-        returns_series = pd.Series(self.returns)
-        self.rolling_std = returns_series.rolling(window=lookback).std().values
-
         self.lookback = lookback
         self.horizon = horizon
 
@@ -39,8 +35,11 @@ class VolatilityDataset(Dataset):
         # Input: raw log returns over lookback window
         x = self.returns[t - self.lookback: t]
 
-        # Target: rolling std volatility over horizon
-        y_vol = self.rolling_std[t: t + self.horizon]
+        # At forecast origin t-1, use future realized RMS volatility.
+        y_vol = np.array([
+            np.sqrt(np.mean(self.returns[t : t + h] ** 2))
+            for h in range(1, self.horizon + 1)
+        ], dtype=np.float32)
         y_ret = self.returns[t: t + self.horizon]
 
         x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(-1)   # [60, 1]

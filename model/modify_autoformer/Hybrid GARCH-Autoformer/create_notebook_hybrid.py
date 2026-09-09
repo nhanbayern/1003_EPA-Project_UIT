@@ -1,5 +1,6 @@
 import nbformat
 from nbformat.v4 import new_notebook, new_code_cell
+from pathlib import Path
 
 nb = new_notebook()
 
@@ -122,14 +123,14 @@ def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name)
                 
                 for j, h in enumerate(HORIZONS):
                     idx = EVAL_INDICES[j]
-                    target_t = t + h - 1
-                    target_time = df['time'].iloc[target_t] if target_t < len(df) else None
-                    target_ret = df['log_return'].iloc[target_t] if target_t < len(df) else None
+                    origin_t = t - 1
+                    origin_time = df['time'].iloc[origin_t] if origin_t >= 0 else None
+                    next_return = df['log_return'].iloc[t] if t < len(df) else None
                     
-                    if target_time is not None:
+                    if origin_time is not None:
                         results.append({
-                            'time': target_time,
-                            'log_return': target_ret,
+                            'time': origin_time,
+                            'log_return': next_return,
                             'horizon': h,
                             'true_volatility': y_vol[i, idx],
                             'predict_volatility': pred_vol[i, idx]
@@ -168,6 +169,8 @@ for tier_name, config in TIERS_CONFIG.items():
             df = pd.DataFrame({'time': dates, 'close': np.random.randn(4059).cumsum() + 1000})
             index_name = 'DAX_40'
             
+        df['time'] = pd.to_datetime(df['time'])
+        df = df[df['time'] >= '2010-01-01'].copy()
         if 'log_return' not in df.columns:
             df['log_return'] = np.log(df['close'] / df['close'].shift(1)) * 100.0
             
@@ -233,5 +236,5 @@ print('\\nALL TIERS DONE! Check /kaggle/working/results_hybrid/')
 
 nb.cells = cells
 
-with open('D:/UIT/1003_EPA_PROJECT/1.0.0/1003_EPA-Project_UIT/model/modify_autoformer/Hybrid GARCH-Autoformer/kaggle_notebook_hybrid.ipynb', 'w') as f:
+with open(Path(__file__).with_name('kaggle_notebook_hybrid.ipynb'), 'w', encoding='utf-8') as f:
     nbformat.write(nb, f)

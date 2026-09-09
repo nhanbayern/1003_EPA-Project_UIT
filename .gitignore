@@ -27,7 +27,12 @@ notes.txt
 /output/**/*.png
 
 /output
+/tmp/
 
 /slide
 /paper
 results_v2.zip
+
+# ICEBA paper build artifacts and assets; retain the source manuscript only
+/ICEBA-paper/*
+!/ICEBA-paper/samplepaper.tex

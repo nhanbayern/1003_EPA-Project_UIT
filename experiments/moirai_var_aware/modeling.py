@@ -133,6 +133,9 @@ class VolatilityRegressionModel(nn.Module):
             nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(hidden_dim, output_dim),
+            # Volatility is a standard deviation and must be non-negative in
+            # both the MSE and VaR terms, not only via a loss-side clamp.
+            nn.Softplus(),
         )
 
     def forward(self, x):

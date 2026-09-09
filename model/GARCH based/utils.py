@@ -39,8 +39,6 @@ def load_close_series(csv_path):
     if "close" not in df.columns:
         raise ValueError(f"Missing close column in {csv_path}")
 
-    close = pd.to_numeric(df["close"], errors="coerce").dropna()
-
     if "time" in df.columns:
         idx = pd.to_datetime(df["time"], errors="coerce")
     elif "date" in df.columns:
@@ -48,7 +46,9 @@ def load_close_series(csv_path):
     else:
         idx = pd.RangeIndex(len(close))
 
-    valid = pd.Series(close.values, index=idx).dropna()
+    close = pd.to_numeric(df["close"], errors="coerce")
+    valid = pd.Series(close.values, index=idx).dropna().sort_index()
+    valid = valid[valid.index >= pd.Timestamp("2010-01-01")]
     if valid.empty:
         raise ValueError(f"No valid close prices in {csv_path}")
 
@@ -89,56 +89,35 @@ def get_split_indices(n_raw_samples, dataset_name):
     train_cnt, val_cnt, test_cnt = FIXED_SPLITS[norm_name]
     return train_cnt, train_cnt + val_cnt
 
-def save_predictions_csv(index_name, model_name, predictions_dict, test_time, 
-                         test_r, full_volatility, test_start_idx, out_dir):
+def save_predictions_csv(index_name, model_name, predictions_dict, origin_times,
+                         future_returns, out_dir):
     """
-    Saves predictions in a format aligned with Moirai output:
-    dataset, model, horizon, time, actual_vol, pred_vol
-    
-    For horizon h, true_volatility (actual_vol) is volatility at index (test_start_idx + i + h - 1),
-    matching Target_{t,h} = sigma_{t+h-1} from problem.md.
-    
-    Parameters:
-    - full_volatility: the FULL volatility series (not just test) for correct multi-horizon alignment
-    - test_start_idx: the global index where test set begins in the full series
+    Save forecasts using the shared causal evaluation schema.  Each row is
+    indexed by forecast origin t and evaluates h-step prediction against the
+    realized RMS of returns r[t+1:t+h+1].
     """
     records = []
     horizons = sorted(list(predictions_dict.keys()))
     
     for h in horizons:
         preds = predictions_dict[h]
-        valid_len = len(preds)
+        valid_len = min(len(preds) - h + 1, len(origin_times) - h + 1,
+                        len(future_returns) - h + 1)
         
         for i in range(valid_len):
-            # Global index for this prediction origin
-            global_idx = test_start_idx + i
-            # Target index for horizon h
-            target_idx = global_idx + h - 1
-            
-            # Get true volatility at t+h-1
-            if target_idx < len(full_volatility):
-                true_vol = full_volatility.iloc[target_idx]
-                if pd.isna(true_vol):
-                    true_vol = np.nan
-            else:
-                true_vol = np.nan
-            
-            # Get time and return for this prediction origin
-            if i < len(test_time):
-                time_val = test_time[i] if not isinstance(test_time, pd.DatetimeIndex) else test_time[i]
-            else:
-                time_val = None
-                
-            if isinstance(test_r, pd.Series):
-                log_ret = test_r.iloc[i] if i < len(test_r) else np.nan
-            else:
-                log_ret = test_r[i] if i < len(test_r) else np.nan
+            realized = np.asarray(future_returns.iloc[i:i + h]
+                                  if isinstance(future_returns, pd.Series)
+                                  else future_returns[i:i + h], dtype=float)
+            true_vol = np.sqrt(np.mean(realized ** 2)) if np.isfinite(realized).all() else np.nan
+            time_val = origin_times[i]
+            log_ret = realized[0] if len(realized) else np.nan
             
             records.append({
                 "dataset": index_name,
                 "model": model_name,
                 "horizon": h,
                 "time": time_val,
+                "log_return": log_ret,
                 "actual_vol": true_vol,
                 "pred_vol": preds[i]
             })

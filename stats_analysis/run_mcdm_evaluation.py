@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import argparse
+import hashlib
+import json
 from pathlib import Path
 import re
 import sys
@@ -21,8 +24,31 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from stats_analysis.risk import VarBacktester
+
 
 MODEL_COLUMNS = ["branch", "tier", "model"]
+CASE_COLUMNS = [*MODEL_COLUMNS, "dataset", "horizon"]
+VAR_METHODS = ("normal", "student_t", "fhs")
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_stats_provenance(stats_root: Path, input_csv: Path) -> None:
+    manifest_path = stats_root / "analysis_manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"Missing analysis manifest: {manifest_path}. Run run_full_var_analysis.py for this CSV first."
+        )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("input_csv_sha256") != sha256(input_csv):
+        raise ValueError("--stats-root was produced from a different --input-csv")
 
 
 @dataclass(frozen=True)
@@ -78,14 +104,20 @@ MCDM_SCENARIOS = (
         name="criteria_5_5",
         folder="5,5",
         label="Accuracy:Risk = 50:50",
-        description="Accuracy 50%, risk 50%; inside risk, pass_rate 50% and abs_violation_error 50%.",
+        description=(
+            "Accuracy 50%, risk 50%; each VaR criterion is averaged across "
+            "Normal, Student-t, and FHS."
+        ),
         criteria=CRITERIA_5_5,
     ),
     McdmScenario(
         name="criteria_3_7",
         folder="3,7",
         label="Accuracy:Risk = 30:70",
-        description="Accuracy 30%, risk 70%; inside each block, criteria are evenly weighted.",
+        description=(
+            "Accuracy 30%, risk 70%; each VaR criterion is averaged across "
+            "Normal, Student-t, and FHS."
+        ),
         criteria=CRITERIA_3_7,
     ),
 )
@@ -117,11 +149,6 @@ METRIC_LABELS = {
 }
 
 
-PREDICTION_CSV_CANDIDATES = (
-    PROJECT_ROOT / "output" / "merged_predictions" / "merged_all_predictions_24_7.csv",
-    PROJECT_ROOT / "output" / "merged_predictions" / "merged_all_predictions.csv",
-    PROJECT_ROOT / "output" / "merged_all_predictions.csv",
-)
 MAX_STD_RATIO_ERROR_FOR_ELIGIBILITY = 0.9
 MIN_TRACKING_CORRELATION_FOR_ELIGIBILITY = 0.0
 
@@ -249,30 +276,182 @@ def criteria_frame(scenario: McdmScenario) -> pd.DataFrame:
     )
 
 
-def load_case(stats_root: Path, var_case: str, alpha: float) -> pd.DataFrame:
-    path = stats_root / var_case / "stats_by_model.csv"
-    if not path.exists():
-        raise FileNotFoundError(f"Missing stats file: {path}")
+def build_averaged_var_metrics(
+    var_predictions_path: Path,
+    var_case: str,
+    alpha: float,
+) -> pd.DataFrame:
+    """Average model-level VaR diagnostics across Normal, Student-t, and FHS.
 
-    df = pd.read_csv(path)
+    Each method is first backtested independently within every
+    configuration-market-horizon block.  The model-level pass rate and
+    violation-rate error are then computed for that method.  The final VaR
+    criteria used by MCDM are the arithmetic means of the three method-level
+    criteria; VaR thresholds themselves are never averaged.
+    """
+    if not var_predictions_path.exists():
+        raise FileNotFoundError(f"Missing VaR prediction file: {var_predictions_path}")
+
+    var_columns = [f"{method}_var" for method in VAR_METHODS]
+    required = [*CASE_COLUMNS, "time", "log_return", *var_columns]
+    df = pd.read_csv(
+        var_predictions_path,
+        usecols=required,
+        parse_dates=["time"],
+        low_memory=False,
+    )
+    df["branch"] = df["branch"].replace({"modify_autoformer": "modified_autoformer"})
+
+    backtester = VarBacktester(alpha=alpha, pvalue_threshold=0.05)
+    records: list[dict] = []
+    for group_key, group in df.groupby(CASE_COLUMNS, dropna=False, sort=True):
+        group = group.sort_values("time")
+        returns = pd.to_numeric(group["log_return"], errors="coerce").to_numpy(dtype=float)
+
+        for method in VAR_METHODS:
+            thresholds = pd.to_numeric(
+                group[f"{method}_var"], errors="coerce"
+            ).to_numpy(dtype=float)
+            valid = np.isfinite(returns) & np.isfinite(thresholds)
+            if not np.any(valid):
+                continue
+
+            violations = returns[valid] < thresholds[valid]
+            violation_rate, _, kupiec_p = backtester.kupiec_test(violations)
+            _, independence_p = backtester.christoffersen_independence_test(violations)
+            backtest_pass = bool(
+                np.isfinite(kupiec_p)
+                and kupiec_p > backtester.pvalue_threshold
+                and np.isfinite(independence_p)
+                and independence_p > backtester.pvalue_threshold
+            )
+            records.append(
+                {
+                    **dict(zip(CASE_COLUMNS, group_key)),
+                    "var_method": method,
+                    "n_risk": int(valid.sum()),
+                    "violation_rate": float(violation_rate),
+                    "backtest_pass": backtest_pass,
+                }
+            )
+
+    detailed = pd.DataFrame.from_records(records)
+    if detailed.empty:
+        raise ValueError(f"No valid VaR observations in {var_predictions_path}")
+
+    method_level = (
+        detailed.groupby([*MODEL_COLUMNS, "var_method"], dropna=False, sort=True)
+        .agg(
+            valid_risk_cases=("n_risk", "size"),
+            total_risk_rows=("n_risk", "sum"),
+            pass_rate=("backtest_pass", "mean"),
+            violation_rate=("violation_rate", "mean"),
+        )
+        .reset_index()
+    )
+    method_level["abs_violation_error"] = (
+        method_level["violation_rate"] - alpha
+    ).abs()
+
+    observed_methods = set(method_level["var_method"].unique())
+    missing_methods = sorted(set(VAR_METHODS) - observed_methods)
+    if missing_methods:
+        raise ValueError(
+            f"{var_predictions_path} is missing VaR methods: {missing_methods}"
+        )
+
+    method_level["_tier_key"] = method_level["tier"].fillna("").astype(str)
+    wide = method_level.pivot(
+        index=["branch", "_tier_key", "model"],
+        columns="var_method",
+        values=[
+            "valid_risk_cases",
+            "total_risk_rows",
+            "pass_rate",
+            "violation_rate",
+            "abs_violation_error",
+        ],
+    )
+    wide.columns = [
+        f"{var_case}_{method}_{metric}" for metric, method in wide.columns
+    ]
+    wide = wide.reset_index().rename(columns={"_tier_key": "tier"})
+    wide["tier"] = wide["tier"].replace("", np.nan)
+
+    for metric in ("pass_rate", "violation_rate", "abs_violation_error"):
+        method_columns = [
+            f"{var_case}_{method}_{metric}" for method in VAR_METHODS
+        ]
+        if wide[method_columns].isna().any(axis=None):
+            raise ValueError(
+                f"Incomplete {metric} values across VaR methods in "
+                f"{var_predictions_path}"
+            )
+        wide[f"{var_case}_{metric}"] = wide[method_columns].mean(axis=1)
+
+    wide[f"{var_case}_risk_method_count"] = len(VAR_METHODS)
+    return wide
+
+
+def load_case(stats_root: Path, var_case: str, alpha: float) -> pd.DataFrame:
+    stats_path = stats_root / var_case / "stats_by_model.csv"
+    if not stats_path.exists():
+        raise FileNotFoundError(f"Missing stats file: {stats_path}")
+
+    df = pd.read_csv(stats_path)
+    df["branch"] = df["branch"].replace(
+        {"modify_autoformer": "modified_autoformer"}
+    )
     required = {*MODEL_COLUMNS, "mse", "mae", "qlike", "pass_rate", "violation_rate"}
     missing = sorted(required - set(df.columns))
     if missing:
-        raise ValueError(f"{path} is missing required columns: {missing}")
+        raise ValueError(f"{stats_path} is missing required columns: {missing}")
 
-    out = df.loc[:, [*MODEL_COLUMNS, "mse", "mae", "qlike", "pass_rate", "violation_rate"]].copy()
-    out[f"{var_case}_pass_rate"] = pd.to_numeric(out["pass_rate"], errors="coerce")
-    out[f"{var_case}_violation_rate"] = pd.to_numeric(out["violation_rate"], errors="coerce")
-    out[f"{var_case}_abs_violation_error"] = (out[f"{var_case}_violation_rate"] - alpha).abs()
-    return out.drop(columns=["pass_rate", "violation_rate"])
+    baseline = df.loc[
+        :, [*MODEL_COLUMNS, "mse", "mae", "qlike", "pass_rate", "violation_rate"]
+    ].copy()
+    baseline = baseline.rename(
+        columns={
+            "pass_rate": "_student_t_baseline_pass_rate",
+            "violation_rate": "_student_t_baseline_violation_rate",
+        }
+    )
+    averaged = build_averaged_var_metrics(
+        stats_root / var_case / "var_predictions.csv",
+        var_case,
+        alpha,
+    )
+    out = baseline.merge(averaged, on=MODEL_COLUMNS, how="inner", validate="one_to_one")
 
+    checks = (
+        (
+            "_student_t_baseline_pass_rate",
+            f"{var_case}_student_t_pass_rate",
+        ),
+        (
+            "_student_t_baseline_violation_rate",
+            f"{var_case}_student_t_violation_rate",
+        ),
+    )
+    for baseline_column, rebuilt_column in checks:
+        if not np.allclose(
+            pd.to_numeric(out[baseline_column], errors="coerce"),
+            pd.to_numeric(out[rebuilt_column], errors="coerce"),
+            rtol=1e-10,
+            atol=1e-12,
+            equal_nan=True,
+        ):
+            raise ValueError(
+                f"Rebuilt Student-t metric {rebuilt_column} does not match "
+                f"{stats_path}"
+            )
 
-def resolve_prediction_csv() -> Path:
-    for path in PREDICTION_CSV_CANDIDATES:
-        if path.exists():
-            return path
-    candidates = "\n".join(str(path) for path in PREDICTION_CSV_CANDIDATES)
-    raise FileNotFoundError(f"Missing prediction CSV. Checked:\n{candidates}")
+    return out.drop(
+        columns=[
+            "_student_t_baseline_pass_rate",
+            "_student_t_baseline_violation_rate",
+        ]
+    )
 
 
 def _tracking_stats(group: pd.DataFrame) -> dict[str, float | int]:
@@ -359,14 +538,14 @@ def build_tracking_metrics(prediction_csv: Path) -> pd.DataFrame:
     return aggregate
 
 
-def build_decision_matrix(stats_root: Path) -> pd.DataFrame:
+def build_decision_matrix(stats_root: Path, prediction_csv: Path) -> pd.DataFrame:
     cases = [load_case(stats_root, var_case, alpha) for var_case, alpha in VAR_CASES.items()]
 
     matrix = cases[0]
     for case in cases[1:]:
         matrix = matrix.merge(case, on=[*MODEL_COLUMNS, "mse", "mae", "qlike"], how="inner")
 
-    tracking = build_tracking_metrics(resolve_prediction_csv())
+    tracking = build_tracking_metrics(prediction_csv)
     matrix = matrix.merge(tracking, on=MODEL_COLUMNS, how="left")
     matrix["model_id"] = model_id(matrix)
     return add_display_columns(matrix)
@@ -844,105 +1023,6 @@ def save_std_ratio_error_by_model_tier_plot(matrix: pd.DataFrame, output_path: P
     plt.close(fig)
 
 
-def garch_autoformer_dominance(combined: pd.DataFrame, scenario: McdmScenario) -> tuple[pd.DataFrame, pd.DataFrame]:
-    grouped = aggregate_for_plots(combined, rank_columns=("avg_mcdm_rank",))
-    baseline_rows = grouped[grouped["display_group"].eq("GARCH-Autoformer")]
-    if baseline_rows.empty:
-        empty_summary = pd.DataFrame(
-            [
-                {
-                    "scenario": scenario.name,
-                    "scenario_label": scenario.label,
-                    "baseline_model": "GARCH-Autoformer",
-                    "metric": metric,
-                    "baseline_score": np.nan,
-                    "total_remaining_models": 0,
-                    "h1_count": 0,
-                    "h1_rate_pct": np.nan,
-                    "mean_other_score": np.nan,
-                    "mean_relative_difference_pct": np.nan,
-                    "note": "GARCH-Autoformer is not available in eligible MCDM ranking",
-                }
-                for metric in ("saw_score", "topsis_score")
-            ]
-        )
-        return empty_summary, pd.DataFrame()
-
-    baseline = baseline_rows.iloc[0]
-    others = grouped[~grouped["display_group"].eq("GARCH-Autoformer")].copy()
-    pairwise_records: list[dict] = []
-    summary_records: list[dict] = []
-
-    for score_column, label in (
-        ("saw_score", "SAW Composite Score"),
-        ("topsis_score", "TOPSIS Closeness Coefficient"),
-    ):
-        baseline_score = float(baseline[score_column])
-        metric_records = []
-        for _, row in others.iterrows():
-            other_score = float(row[score_column])
-            absolute_difference = baseline_score - other_score
-            relative_difference_pct = (
-                absolute_difference / abs(other_score) * 100.0 if not np.isclose(other_score, 0.0) else np.nan
-            )
-            h1 = bool(baseline_score > other_score)
-            record = {
-                "scenario": scenario.name,
-                "scenario_label": scenario.label,
-                "baseline_model": "GARCH-Autoformer",
-                "comparison_model": row["display_group"],
-                "metric": label,
-                "metric_column": score_column,
-                "baseline_score": baseline_score,
-                "comparison_score": other_score,
-                "absolute_difference": absolute_difference,
-                "relative_difference_pct": relative_difference_pct,
-                "h1_garch_autoformer_outperforms": h1,
-            }
-            metric_records.append(record)
-            pairwise_records.append(record)
-
-        metric_frame = pd.DataFrame.from_records(metric_records)
-        total = int(len(metric_frame))
-        h1_count = int(metric_frame["h1_garch_autoformer_outperforms"].sum()) if total else 0
-        h1_rate = h1_count / total if total else np.nan
-        null_win_rate = 0.5
-        if total:
-            binomial_p_value = float(stats.binomtest(h1_count, total, null_win_rate, alternative="greater").pvalue)
-            z_stat = (h1_rate - null_win_rate) / np.sqrt(null_win_rate * (1.0 - null_win_rate) / total)
-            z_p_value = float(stats.norm.sf(z_stat))
-        else:
-            binomial_p_value = np.nan
-            z_stat = np.nan
-            z_p_value = np.nan
-        summary_records.append(
-            {
-                "scenario": scenario.name,
-                "scenario_label": scenario.label,
-                "baseline_model": "GARCH-Autoformer",
-                "metric": label,
-                "metric_column": score_column,
-                "baseline_score": baseline_score,
-                "total_remaining_models": total,
-                "h1_count": h1_count,
-                "h1_rate_pct": h1_rate * 100.0 if total else np.nan,
-                "null_win_rate": null_win_rate,
-                "binomial_p_value_greater": binomial_p_value,
-                "one_proportion_z_stat": z_stat,
-                "one_proportion_z_p_value_greater": z_p_value,
-                "mean_other_score": float(metric_frame["comparison_score"].mean()) if total else np.nan,
-                "mean_relative_difference_pct": float(metric_frame["relative_difference_pct"].mean()) if total else np.nan,
-                "note": (
-                    "H1 is counted when GARCH-Autoformer score is greater than the comparison model score. "
-                    "The binomial p-value is the preferred exact one-sided test against a 50% win-rate null; "
-                    "the z p-value is the normal-approximation one-proportion z-test."
-                ),
-            }
-        )
-
-    return pd.DataFrame.from_records(summary_records), pd.DataFrame.from_records(pairwise_records)
-
-
 def save_analysis_plots(
     output_dir: Path,
     scenario: McdmScenario,
@@ -983,8 +1063,6 @@ def run_scenario(matrix: pd.DataFrame, scenario: McdmScenario, output_dir: Path)
     saw = saw_ranking(eligible_matrix, scenario.criteria)
     topsis = topsis_ranking(eligible_matrix, scenario.criteria)
     combined = combined_ranking(saw, topsis)
-    garch_dominance_summary, garch_dominance_pairwise = garch_autoformer_dominance(combined, scenario)
-
     outputs = {
         "CriteriaWeights.csv": criteria_frame(scenario),
         "MCDMInputMetrics.csv": matrix,
@@ -992,8 +1070,6 @@ def run_scenario(matrix: pd.DataFrame, scenario: McdmScenario, output_dir: Path)
         "SAWRanking.csv": saw,
         "TOPSISRanking.csv": topsis,
         "CombinedMCDMRanking.csv": combined,
-        "GARCHAutoformerDominanceSummary.csv": garch_dominance_summary,
-        "GARCHAutoformerPairwiseDominance.csv": garch_dominance_pairwise,
     }
     for filename, frame in outputs.items():
         path = output_dir / filename
@@ -1004,20 +1080,31 @@ def run_scenario(matrix: pd.DataFrame, scenario: McdmScenario, output_dir: Path)
     print(f"Saved analysis plots in {output_dir}")
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run MCDM from explicit canonical artifacts.")
+    parser.add_argument("--input-csv", type=Path, required=True)
+    parser.add_argument("--stats-root", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
+    if not args.input_csv.is_file():
+        raise FileNotFoundError(f"Missing --input-csv: {args.input_csv}")
+    if not args.stats_root.is_dir():
+        raise FileNotFoundError(f"Missing --stats-root: {args.stats_root}")
+    if args.output_dir.exists():
+        raise FileExistsError(f"--output-dir already exists: {args.output_dir}")
+    validate_stats_provenance(args.stats_root, args.input_csv)
     for scenario in MCDM_SCENARIOS:
         validate_weights(scenario.criteria)
-
-    stats_root = PROJECT_ROOT / "output" / "stats_analysis"
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    run_root = PROJECT_ROOT / "output" / "mcdm_results" / f"MCDM{timestamp}"
-    run_root.mkdir(parents=True, exist_ok=True)
-
-    matrix = build_decision_matrix(stats_root)
-    print(f"MCDM run root: {run_root}")
+    args.output_dir.mkdir(parents=True)
+    matrix = build_decision_matrix(args.stats_root, args.input_csv)
+    print(f"MCDM run root: {args.output_dir}")
 
     for scenario in MCDM_SCENARIOS:
-        scenario_dir = run_root / scenario.folder
+        scenario_dir = args.output_dir / scenario.folder
         print(f"Running {scenario.name}: {scenario.description}")
         run_scenario(matrix, scenario, scenario_dir)
 
