@@ -257,6 +257,7 @@ def _prepare_notebook(source: Path, destination: Path, output_dir: Path, smoke_t
             text = text.replace("for csv_file in csv_files:", "for csv_file in csv_files[:1]:")
             text = text.replace("EPOCHS = 30", "EPOCHS = 1")
             text = text.replace("EPOCHS = 50", "EPOCHS = 1")
+            text = text.replace("EPOCHS=50", "EPOCHS=1")
             text = text.replace("epochs=30", "epochs=1")
             text = text.replace(
                 "LAMBDA_VARS = [0.0, 0.05, 0.1, 0.2, 0.5, 1.0]",
