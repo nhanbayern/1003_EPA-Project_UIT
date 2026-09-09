@@ -39,11 +39,31 @@ class VolatilityFeatureExtractor(nn.Module):
         self.device = device
         self.freeze_backbone = freeze_backbone
 
+        model_name_map = {
+            "moirai": f"moirai-1.1-R-{size}",
+            "moirai2": f"moirai-2.0-R-{size}",
+            "moirai_moe": f"moirai-moe-1.0-R-{size}",
+        }
+        hf_repo_map = {
+            "moirai": f"Salesforce/moirai-1.1-R-{size}",
+            "moirai2": f"Salesforce/moirai-2.0-R-{size}",
+            "moirai_moe": f"Salesforce/moirai-moe-1.0-R-{size}",
+        }
+        if model_type not in model_name_map:
+            raise ValueError("model_type must be moirai, moirai2, or moirai_moe")
+
+        local_path = os.path.join(weights_dir, model_name_map[model_type]) if weights_dir else None
+        if local_path and os.path.isdir(local_path):
+            model_target = local_path
+        else:
+            model_target = hf_repo_map[model_type]
+            print(f"[{model_type}] Local weights not found at '{local_path}'. Using Hugging Face Hub: '{model_target}'")
+
         if model_type == "moirai":
             from uni2ts.common.torch_util import packed_attention_mask
             from uni2ts.model.moirai import MoiraiModule
 
-            self.backbone = MoiraiModule.from_pretrained(os.path.join(weights_dir, f"moirai-1.1-R-{size}"))
+            self.backbone = MoiraiModule.from_pretrained(model_target)
             self.d_model = self.backbone.d_model
             self.packed_attention_mask = packed_attention_mask
             self.max_patch = max(self.backbone.patch_sizes)
@@ -51,7 +71,7 @@ class VolatilityFeatureExtractor(nn.Module):
             from uni2ts.common.torch_util import packed_causal_attention_mask
             from uni2ts.model.moirai2 import Moirai2Module
 
-            self.backbone = Moirai2Module.from_pretrained(os.path.join(weights_dir, f"moirai-2.0-R-{size}"))
+            self.backbone = Moirai2Module.from_pretrained(model_target)
             self.d_model = self.backbone.d_model
             self.packed_causal_attention_mask = packed_causal_attention_mask
             self.max_patch = self.backbone.patch_size
@@ -59,12 +79,10 @@ class VolatilityFeatureExtractor(nn.Module):
             from uni2ts.common.torch_util import packed_causal_attention_mask
             from uni2ts.model.moirai_moe import MoiraiMoEModule
 
-            self.backbone = MoiraiMoEModule.from_pretrained(os.path.join(weights_dir, f"moirai-moe-1.0-R-{size}"))
+            self.backbone = MoiraiMoEModule.from_pretrained(model_target)
             self.d_model = self.backbone.d_model
             self.packed_causal_attention_mask = packed_causal_attention_mask
             self.max_patch = max(self.backbone.patch_sizes)
-        else:
-            raise ValueError("model_type must be moirai, moirai2, or moirai_moe")
 
         for param in self.backbone.parameters():
             param.requires_grad = not freeze_backbone
