@@ -407,12 +407,14 @@ def main(families: str = "garch,transformer,moiraivar", output_dir: str = "outpu
         calls[family] = run_selected.spawn([family], smoke_test=smoke_test, run_id=f"{timestamp}/{family}")
 
     weight_paths = {
-        "garch": "garch/model_params",
-        "transformer": "transformer/models_weights",
-        "moirai": "moirai/weights",
+        # Legacy notebooks create a family-named results directory after the
+        # family root has already been rewritten by _prepare_notebook.
+        "garch": "garch/garch/model_params",
+        "transformer": "transformer/transformer/models_weights",
+        "moirai": "moirai/moirai/weights",
         "moiraivar": "moiraivar/weights",
-        "hybrid": "hybrid/models_weights",
-        "wavelet": "wavelet/models_weights",
+        "hybrid": "hybrid/hybrid/models_weights",
+        "wavelet": "wavelet/wavelet/models_weights",
     }
     for family, call in calls.items():
         archive_path = local_run_dir / f"{family}_artifacts.zip"
