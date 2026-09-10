@@ -7,9 +7,16 @@ from __future__ import annotations
 
 import io
 import os
+import sys
 import zipfile
 from datetime import datetime
 from pathlib import Path
+
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import modal
 
@@ -247,12 +254,17 @@ def _prepare_notebook(source: Path, destination: Path, output_dir: Path, smoke_t
         text = text.replace("'uni2ts/src'", "'/root/uni2ts/src'")
         text = text.replace("/kaggle/input/datasets/trnhngv/historical-price", "/root/dataset")
         text = text.replace("/kaggle/input/datasets/trnhngv/weights", "/root/weights")
-        text = text.replace("/kaggle/working/results_hybrid", str(output_dir / "hybrid"))
-        text = text.replace("/kaggle/working/results_wavelet", str(output_dir / "wavelet"))
-        text = text.replace("/kaggle/working/results_v2", str(output_dir / "transformer"))
-        text = text.replace("/kaggle/working/results", str(output_dir / "garch"))
-        text = text.replace("/kaggle/working/moirai_var", str(output_dir / "moiraivar" / "moirai_var"))
-        text = text.replace("/kaggle/working/predictions", str(output_dir / "moirai" / "predictions"))
+        text = text.replace("/kaggle/working/results_hybrid", (output_dir / "hybrid").as_posix())
+        text = text.replace("/kaggle/working/results_wavelet", (output_dir / "wavelet").as_posix())
+        text = text.replace("/kaggle/working/results_v2", (output_dir / "transformer").as_posix())
+        text = text.replace("/kaggle/working/results", (output_dir / "garch").as_posix())
+        text = text.replace("/kaggle/working/moirai_var", (output_dir / "moiraivar" / "moirai_var").as_posix())
+        text = text.replace("/kaggle/working/predictions", (output_dir / "moirai" / "predictions").as_posix())
+        target_zip = (output_dir / "moirai" / "all_predictions").as_posix()
+        text = text.replace(
+            "zip_filename = '/kaggle/working/all_predictions'",
+            f"zip_filename = '{target_zip}'",
+        )
         text = text.replace("/kaggle/input/volatility-dataset/dataset/", "/root/dataset")
         text = text.replace("/kaggle/input/datasets/trnhngv/weights/weights", "/root/weights")
         # The baseline notebook's Kaggle path contains a duplicated `weights`
@@ -507,7 +519,7 @@ def main(families: str = "garch,transformer,moirai,moiraivar,hybrid,wavelet", ou
         "garch": "garch/garch/model_params",
         "transformer": "transformer/transformer/models_weights",
         "moirai": "moirai/moirai/weights",
-        "moiraivar": "moiraivar/weights",
+        "moiraivar": "moiraivar/moiraivar/weights",
         "hybrid": "hybrid/hybrid/models_weights",
         "wavelet": "wavelet/wavelet/models_weights",
     }
@@ -525,10 +537,11 @@ def main(families: str = "garch,transformer,moirai,moiraivar,hybrid,wavelet", ou
             local_weights = local_run_dir / family / Path(weight_paths[family]).relative_to(family)
             local_weights.mkdir(parents=True, exist_ok=True)
             subprocess.run(
-                ["py", "-3.11", "-m", "modal", "volume", "get",
+                [sys.executable, "-m", "modal", "volume", "get",
                  RESULTS_VOLUME_NAME, f"/{timestamp}/{weight_paths[family]}",
                  str(local_weights), "--force"],
                 check=True,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             )
             print(f"downloaded completed family: {family} -> {local_run_dir}")
         except Exception as exc:
