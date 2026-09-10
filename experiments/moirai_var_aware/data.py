@@ -15,8 +15,17 @@ class VolatilityDataset(Dataset):
         self.lookback = lookback
         self.horizons = horizons or HORIZONS
 
+        if lookback < 1 or not self.horizons or any(int(h) < 1 for h in self.horizons):
+            raise ValueError("lookback and horizons must be positive")
+        required = {"time", "close"}
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"Missing required columns: {sorted(missing)}")
+
         df = df.sort_values("time").reset_index(drop=True)
         close = df["close"].values
+        if not np.isfinite(close.astype(float)).all() or (close <= 0).any():
+            raise ValueError("close must contain finite positive prices")
         returns = np.diff(np.log(close)) * 100
         self.returns = np.concatenate([[0.0], returns])
         df["returns"] = self.returns
@@ -71,6 +80,8 @@ def load_and_split_dataset(csv_path: str, index_name: str):
     test_size = split["test"]
 
     max_horizon = max(full_ds.horizons)
+    if train_size <= max_horizon or val_size <= max_horizon or test_size <= max_horizon:
+        raise ValueError("Each split must be longer than the maximum forecast horizon")
     val_start, val_end = train_size, train_size + val_size
     test_start, test_end = val_end, val_end + test_size
 
@@ -81,6 +92,8 @@ def load_and_split_dataset(csv_path: str, index_name: str):
             if start <= s["origin_position"] < end - max_horizon
         }
         indices = [i for i, s in enumerate(full_ds.samples) if s["origin_position"] in allowed]
+        if not indices:
+            raise ValueError(f"No usable purged origins in split [{start}, {end})")
         return torch.utils.data.Subset(full_ds, indices)
 
     train_ds = subset_for(0, train_size)

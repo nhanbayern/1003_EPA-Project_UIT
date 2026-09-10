@@ -8,6 +8,7 @@ class VolatilityDataset(Dataset):
         """
         df: DataFrame containing at least 'close' or 'log_return'
         """
+        df = df.copy()
         if 'log_return' not in df.columns:
             if 'close' in df.columns:
                 df['log_return'] = np.log(df['close'] / df['close'].shift(1)) * 100.0
@@ -23,7 +24,7 @@ class VolatilityDataset(Dataset):
         
         self.valid_indices = []
         # t is the end of the lookback window
-        for t in range(lookback, len(self.returns) - horizon + 1):
+        for t in range(lookback - 1, len(self.returns) - horizon):
             self.valid_indices.append(t)
             
     def __len__(self):

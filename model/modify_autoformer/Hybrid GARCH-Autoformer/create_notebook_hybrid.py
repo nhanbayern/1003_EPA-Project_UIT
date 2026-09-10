@@ -57,8 +57,8 @@ SPLITS = {
 # Cell 4: Train Function
 cells.append(new_code_cell("""\
 def train_model(model, train_loader, val_loader):
-    # Baseline target is rolling volatility; optimize the same MSE reported
-    # for the point-forecast comparison.
+    # Optimize the declared future-realized volatility target.  Historical
+    # GARCH volatility remains an input feature only.
     criterion = torch.nn.MSELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     best_val_loss = float('inf')

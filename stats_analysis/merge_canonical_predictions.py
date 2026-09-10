@@ -1,7 +1,8 @@
 """Build an auditable, common-key benchmark from canonical prediction CSVs.
 
 Every input row must already use the project schema and the same causal
-definition: origin time t, log_return=r[t+1], and future realized-RMS target.
+definition: origin time t, log_return=r[t+1], and future realized population
+standard-deviation target ``std(r[t+1:t+h+1], ddof=0)``.
 The merger intentionally retains only keys observed for *every* configuration;
 it never pads or imputes a missing forecast.
 """
@@ -27,6 +28,7 @@ REQUIRED = [
 ]
 CONFIG = ["branch", "tier", "model"]
 KEY = ["dataset", "time", "horizon"]
+HORIZONS = {1, 3, 5, 10, 21}
 
 
 def sha256(path: Path) -> str:
@@ -76,6 +78,8 @@ def load_file(path: Path) -> pd.DataFrame:
     frame = frame.loc[:, REQUIRED].copy()
     frame["time"] = pd.to_datetime(frame["time"], errors="raise").dt.strftime("%Y-%m-%d")
     frame["horizon"] = pd.to_numeric(frame["horizon"], errors="raise").astype(int)
+    if not set(frame["horizon"]).issubset(HORIZONS):
+        raise ValueError(f"{path} contains unsupported horizons")
     for column in ("log_return", "true_volatility", "predict_volatility"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
     if not np.isfinite(frame[["log_return", "true_volatility", "predict_volatility"]].to_numpy()).all():

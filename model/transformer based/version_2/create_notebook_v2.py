@@ -60,8 +60,8 @@ SPLITS = {
 # Cell 4: Train Function
 cells.append(new_code_cell("""\
 def train_model(model, train_loader, val_loader):
-    # The target is rolling 60-day volatility, so train and select by the
-    # paper's multi-horizon MSE rather than a return likelihood.
+    # The dataset constructs future-realized std targets.  Keep training and
+    # model selection on that declared target only.
     criterion = torch.nn.MSELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     best_val_loss = float('inf')

@@ -1052,13 +1052,30 @@ def save_analysis_plots(
     save_std_ratio_error_by_model_tier_plot(matrix, output_dir / "VolatilityStdRatioErrorByModelTier.png")
 
 
-def run_scenario(matrix: pd.DataFrame, scenario: McdmScenario, output_dir: Path) -> None:
+def run_scenario(
+    matrix: pd.DataFrame,
+    scenario: McdmScenario,
+    output_dir: Path,
+    allowed_model_ids: set[str],
+) -> None:
+    """Rank a test matrix after a gate frozen on validation data.
+
+    The test matrix is never used to decide eligibility.  ``allowed_model_ids``
+    must therefore come from the validation matrix produced by the caller.
+    """
     validate_weights(scenario.criteria)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    eligible_matrix, excluded = split_eligible_models(matrix, scenario.criteria)
+    if not allowed_model_ids:
+        raise ValueError("Validation-only selection gate produced no eligible models")
+    eligible_mask = matrix["model_id"].astype(str).isin(allowed_model_ids)
+    eligible_matrix = matrix.loc[eligible_mask].copy()
+    excluded = matrix.loc[~eligible_mask].copy()
+    excluded["excluded_reason"] = "excluded by validation-only sanity gate"
     if eligible_matrix.empty:
-        raise ValueError(f"No model has complete criteria for MCDM scoring in {scenario.name}")
+        raise ValueError(
+            f"No validation-eligible model is present in the test matrix for {scenario.name}"
+        )
 
     saw = saw_ranking(eligible_matrix, scenario.criteria)
     topsis = topsis_ranking(eligible_matrix, scenario.criteria)
@@ -1084,6 +1101,18 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run MCDM from explicit canonical artifacts.")
     parser.add_argument("--input-csv", type=Path, required=True)
     parser.add_argument("--stats-root", type=Path, required=True)
+    parser.add_argument(
+        "--selection-input-csv",
+        type=Path,
+        required=True,
+        help="Validation prediction artifact used only to freeze the eligibility gate.",
+    )
+    parser.add_argument(
+        "--selection-stats-root",
+        type=Path,
+        required=True,
+        help="Stats root generated from --selection-input-csv.",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser.parse_args()
 
@@ -1094,19 +1123,43 @@ def main() -> None:
         raise FileNotFoundError(f"Missing --input-csv: {args.input_csv}")
     if not args.stats_root.is_dir():
         raise FileNotFoundError(f"Missing --stats-root: {args.stats_root}")
+    if not args.selection_input_csv.is_file():
+        raise FileNotFoundError(f"Missing --selection-input-csv: {args.selection_input_csv}")
+    if not args.selection_stats_root.is_dir():
+        raise FileNotFoundError(f"Missing --selection-stats-root: {args.selection_stats_root}")
     if args.output_dir.exists():
         raise FileExistsError(f"--output-dir already exists: {args.output_dir}")
     validate_stats_provenance(args.stats_root, args.input_csv)
+    validate_stats_provenance(args.selection_stats_root, args.selection_input_csv)
     for scenario in MCDM_SCENARIOS:
         validate_weights(scenario.criteria)
     args.output_dir.mkdir(parents=True)
     matrix = build_decision_matrix(args.stats_root, args.input_csv)
+    selection_matrix = build_decision_matrix(
+        args.selection_stats_root, args.selection_input_csv
+    )
+    validation_eligible, validation_excluded = split_eligible_models(
+        selection_matrix, MCDM_SCENARIOS[0].criteria
+    )
+    allowed_model_ids = set(validation_eligible["model_id"].astype(str))
+    gate = selection_matrix[[*MODEL_COLUMNS, "model_id"]].copy()
+    gate["selected_on_validation"] = gate["model_id"].astype(str).isin(allowed_model_ids)
+    gate = gate.merge(
+        validation_excluded[["model_id", "excluded_reason"]],
+        on="model_id",
+        how="left",
+    )
+    gate.to_csv(args.output_dir / "ValidationSelectionGate.csv", index=False)
+    print(
+        f"Validation-only gate: {len(allowed_model_ids)} eligible / "
+        f"{len(selection_matrix)} candidates"
+    )
     print(f"MCDM run root: {args.output_dir}")
 
     for scenario in MCDM_SCENARIOS:
         scenario_dir = args.output_dir / scenario.folder
         print(f"Running {scenario.name}: {scenario.description}")
-        run_scenario(matrix, scenario, scenario_dir)
+        run_scenario(matrix, scenario, scenario_dir, allowed_model_ids)
 
 
 if __name__ == "__main__":

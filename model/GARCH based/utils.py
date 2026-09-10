@@ -87,35 +87,48 @@ def get_split_indices(n_raw_samples, dataset_name):
         raise ValueError(f"Dataset '{dataset_name}' not in FIXED_SPLITS")
 
     train_cnt, val_cnt, test_cnt = FIXED_SPLITS[norm_name]
+    required = train_cnt + val_cnt + test_cnt
+    if int(n_raw_samples) < required:
+        raise ValueError(
+            f"Not enough rows for declared fixed split {norm_name}: "
+            f"need {required}, got {n_raw_samples}"
+        )
     return train_cnt, train_cnt + val_cnt
 
 def save_predictions_csv(index_name, model_name, predictions_dict, origin_times,
                          future_returns, out_dir, history_returns=None):
     """
-    Save forecasts using the shared causal evaluation schema.  Each row is
-    indexed by forecast origin t and evaluates against the offset 60-day
-    rolling standard deviation defined in ICEBA-paper/samplepaper.tex.
+    Save forecasts using the shared causal evaluation schema.
+
+    Each row is indexed by forecast origin ``t``.  For horizon ``h`` the
+    realized target is ``std(r[t+1:t+h+1], ddof=0)`` and ``log_return`` is the
+    first unseen return ``r[t+1]``.  Historical rolling volatility is never
+    used as the evaluation target.
     """
     records = []
     horizons = sorted(list(predictions_dict.keys()))
-    
-    history = np.asarray(history_returns if history_returns is not None else [], dtype=float)[-60:]
-    joined = np.concatenate([history, np.asarray(future_returns, dtype=float)])
-    history_len = len(history)
+
+    future_arr = np.asarray(future_returns, dtype=float)
+    origin_arr = np.asarray(origin_times)
+    if len(origin_arr) != len(future_arr):
+        raise ValueError(
+            "origin_times and future_returns must be aligned one-for-one "
+            f"(got {len(origin_arr)} and {len(future_arr)})"
+        )
+    if not horizons or any(int(h) < 1 for h in horizons):
+        raise ValueError("predictions_dict must contain positive horizons")
+
     for h in horizons:
-        preds = predictions_dict[h]
-        valid_len = min(len(preds) - h + 1, len(origin_times) - h + 1,
-                        len(future_returns) - h + 1)
+        h = int(h)
+        preds = np.asarray(predictions_dict[h], dtype=float)
+        valid_len = min(len(preds), len(origin_arr) - h + 1)
+        if valid_len <= 0:
+            continue
         
         for i in range(valid_len):
-            realized = np.asarray(future_returns.iloc[i:i + h]
-                                  if isinstance(future_returns, pd.Series)
-                                  else future_returns[i:i + h], dtype=float)
-            # Origin-aligned target: only future returns after t are allowed.
-            # `future_returns[i:i+h]` is r[t+1:t+h+1].
-            target_window = realized
-            true_vol = np.std(target_window, ddof=0) if len(target_window) == h and np.isfinite(target_window).all() else np.nan
-            time_val = origin_times[i]
+            realized = future_arr[i:i + h]
+            true_vol = np.std(realized, ddof=0) if np.isfinite(realized).all() else np.nan
+            time_val = origin_arr[i]
             log_ret = realized[0] if len(realized) else np.nan
             
             records.append({

@@ -7,6 +7,7 @@ import pandas as pd
 
 DEFAULT_SEQ_LEN = 60
 DEFAULT_VOL_WINDOW = 60
+EVAL_HORIZONS = (1, 3, 5, 10, 21)
 
 # Fixed split counts per dataset (Train, Val, Test) - data range 2010-2025
 # Keys must match SPLIT_COUNTS from notebook specification
@@ -95,10 +96,10 @@ def filter_close_by_date(close_prices, date_start=None, date_end=None):
 
 def prepare_aaai24_series(close_prices, volatility_window=DEFAULT_VOL_WINDOW):
     """
-    Compute log-returns and 60-day rolling volatility from close prices.
+    Compute log-returns and a historical 60-day volatility feature.
     
     Returns: ln(Close_t / Close_{t-1}) × 100  (log-return in percent-points)
-    Vol: sqrt(mean((r_t - mean(r))^2)) over past 60 returns × 100 (volatility %)
+    Vol: population std over the observed rolling window × 100 (feature only)
     
     Both are scaled to 100× for percentage representation.
     """
@@ -109,7 +110,8 @@ def prepare_aaai24_series(close_prices, volatility_window=DEFAULT_VOL_WINDOW):
     # Log-return: ln(Close_t / Close_{t-1})
     returns = np.log(close / close.shift(1)).dropna()
 
-    # 60-day rolling volatility from past returns (shift(1) avoids leakage)
+    # Historical rolling volatility is an input feature.  It is evaluated at
+    # the current observed return and is never used as the future target.
     volatility = returns.rolling(window=int(volatility_window)).std(ddof=0).dropna()
 
     # Align returns to volatility index (remove leading NaNs from rolling)
@@ -141,10 +143,12 @@ def _get_split_indices(n_samples, split_mode, dataset_name=None):
             raise ValueError(f"Dataset '{dataset_name}' not in FIXED_SPLITS")
 
         train_cnt, val_cnt, test_cnt = FIXED_SPLITS[norm_name]
-        if n_samples < train_cnt + val_cnt + test_cnt:
-            test_cnt = n_samples - train_cnt - val_cnt
-            if test_cnt < 0:
-                raise ValueError(f"Not enough data: need {train_cnt + val_cnt}, got {n_samples}")
+        required = train_cnt + val_cnt + test_cnt
+        if n_samples < required:
+            raise ValueError(
+                f"Not enough data for declared fixed split {norm_name}: "
+                f"need {required}, got {n_samples}. Refusing to shrink the test set."
+            )
 
         return train_cnt, train_cnt + val_cnt
 
@@ -182,8 +186,8 @@ def create_sliding_windows(returns, volatility, seq_len=DEFAULT_SEQ_LEN, horizon
         multi_horizon: if True, create targets for all horizons [1..max_horizon]
                       else create targets for single horizon only
     """
-    r = pd.Series(returns).astype(float)
-    v = pd.Series(volatility).astype(float)
+    r = pd.Series(returns).reset_index(drop=True).astype(float)
+    v = pd.Series(volatility).reset_index(drop=True).astype(float)
     n = min(len(r), len(v))
 
     if seq_len < 1 or horizon < 1:
@@ -191,7 +195,7 @@ def create_sliding_windows(returns, volatility, seq_len=DEFAULT_SEQ_LEN, horizon
 
     if multi_horizon:
         # One-shot multi-horizon: create targets for [1, 3, 5, 10, 21] in one sample
-        horizons = [1, 3, 5, 10, 21]
+        horizons = list(EVAL_HORIZONS)
         max_horizon = max(horizons)
         max_start = n - seq_len - max_horizon + 1
         
@@ -208,9 +212,14 @@ def create_sliding_windows(returns, volatility, seq_len=DEFAULT_SEQ_LEN, horizon
         for i in range(max_start):
             windows["encoder_returns"].append(r.iloc[i : i + seq_len].values)
             windows["decoder_volatility"].append(v.iloc[i : i + seq_len].values)
-            # Create targets for each horizon
+            # The return target is the return at the forecast endpoint.  The
+            # volatility target is computed strictly from future returns; the
+            # historical rolling series is a causal input feature only.
             target_ret = [float(r.iloc[i + seq_len + h - 1]) for h in horizons]
-            target_var = [float(v.iloc[i + seq_len + h - 1]) for h in horizons]
+            target_var = [
+                float(np.std(r.iloc[i + seq_len : i + seq_len + h], ddof=0))
+                for h in horizons
+            ]
             windows["target_returns"].append(target_ret)
             windows["target_variance"].append(target_var)
 
@@ -237,7 +246,8 @@ def create_sliding_windows(returns, volatility, seq_len=DEFAULT_SEQ_LEN, horizon
             windows["encoder_returns"].append(r.iloc[i : i + seq_len].values)
             windows["decoder_volatility"].append(v.iloc[i : i + seq_len].values)
             windows["target_returns"].append(float(r.iloc[i + seq_len + horizon - 1]))
-            windows["target_variance"].append(float(v.iloc[i + seq_len + horizon - 1]))
+            future_returns = r.iloc[i + seq_len : i + seq_len + horizon]
+            windows["target_variance"].append(float(np.std(future_returns, ddof=0)))
 
         return {k: np.asarray(v, dtype=np.float32) for k, v in windows.items()}
 

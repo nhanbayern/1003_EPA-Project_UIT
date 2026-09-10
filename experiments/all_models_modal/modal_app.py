@@ -24,7 +24,12 @@ WEIGHTS = ROOT / "model" / "Morai based" / "weights"
 APP_NAME = "volatility-benchmark-all-models"
 
 app = modal.App(APP_NAME)
-artifact_volume = modal.Volume.from_name("volatility-benchmark-artifacts", create_if_missing=True)
+# Reuse Modal's Results volume when it exists; otherwise create it on first run.
+RESULTS_VOLUME_NAME = "Results"
+artifact_volume = modal.Volume.from_name(
+    RESULTS_VOLUME_NAME,
+    create_if_missing=True,
+)
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git")
@@ -54,6 +59,7 @@ STANDARD_COLUMNS = [
     "dataset", "branch", "tier", "model", "time", "horizon",
     "log_return", "true_volatility", "predict_volatility",
 ]
+CANONICAL_HORIZONS = {1, 3, 5, 10, 21}
 
 
 def _key(value: object) -> str:
@@ -200,6 +206,28 @@ def _normalize_predictions(output_dir: Path) -> None:
         normalized = frame.reindex(columns=STANDARD_COLUMNS)
         normalized.to_csv(destination / f"MoiraiVaR_{csv_file.name}", index=False)
 
+    # Fail closed before an artifact can be promoted.  This validates the
+    # contract at the boundary shared by every model family, instead of
+    # allowing a malformed family export to be silently merged later.
+    required = set(STANDARD_COLUMNS)
+    for normalized_file in sorted(destination.glob("*.csv")):
+        frame = pd.read_csv(normalized_file)
+        missing = required - set(frame.columns)
+        if missing:
+            raise ValueError(f"{normalized_file.name}: missing canonical columns {sorted(missing)}")
+        if frame.empty:
+            raise ValueError(f"{normalized_file.name}: empty prediction artifact")
+        horizons = set(pd.to_numeric(frame["horizon"], errors="coerce").dropna().astype(int))
+        if not horizons or not horizons.issubset(CANONICAL_HORIZONS):
+            raise ValueError(f"{normalized_file.name}: invalid horizons {sorted(horizons)}")
+        numeric = frame[["horizon", "log_return", "true_volatility", "predict_volatility"]]
+        if not np.isfinite(numeric.to_numpy(dtype=float)).all():
+            raise ValueError(f"{normalized_file.name}: non-finite canonical values")
+        if (frame["true_volatility"] < 0).any() or (frame["predict_volatility"] < 0).any():
+            raise ValueError(f"{normalized_file.name}: volatility must be non-negative")
+        if frame.duplicated(["dataset", "branch", "tier", "model", "time", "horizon"]).any():
+            raise ValueError(f"{normalized_file.name}: duplicate origin/horizon rows")
+
 
 def _prepare_notebook(source: Path, destination: Path, output_dir: Path, smoke_test: bool = False, lambda_sweep: str = "0,0.05,0.1,0.2,0.5,1") -> None:
     """Make the committed Kaggle notebook portable without altering its source file."""
@@ -287,7 +315,20 @@ def _prepare_notebook(source: Path, destination: Path, output_dir: Path, smoke_t
             text = text.replace(
                 baseline_marker,
                 baseline_marker + "\n        weights_path = os.path.join('/root/modal_output/moirai/weights', f'{index_name}_{m_type}.pt')\n        os.makedirs(os.path.dirname(weights_path), exist_ok=True)\n        torch.save(model.state_dict(), weights_path)",
+                )
+        forbidden_target_fragments = (
+            "target_window = self.returns[t + h - lookback",
+            "target_window=self.returns[t+h-lookback",
+            "np.sqrt(np.mean(future_returns ** 2))",
+            "target_t = t + h - 1",
+        )
+        stale = [fragment for fragment in forbidden_target_fragments if fragment in text]
+        if stale:
+            raise ValueError(
+                f"{source.name}: stale target/origin code remains after preparation: {stale}"
             )
+        if "future_returns = self.returns[t + 1: t + h + 1]" in text and "np.std(future_returns, ddof=0)" not in text:
+            raise ValueError(f"{source.name}: future target must use population std (ddof=0)")
         # Emit structured milestones during the long-running legacy notebooks.
         text = text.replace(
             "for csv_file in csv_files:",
@@ -484,7 +525,7 @@ def main(families: str = "garch,transformer,moirai,moiraivar,hybrid,wavelet", ou
             local_weights.mkdir(parents=True, exist_ok=True)
             subprocess.run(
                 ["py", "-3.11", "-m", "modal", "volume", "get",
-                 "volatility-benchmark-artifacts", f"/{timestamp}/{weight_paths[family]}",
+                 RESULTS_VOLUME_NAME, f"/{timestamp}/{weight_paths[family]}",
                  str(local_weights), "--force"],
                 check=True,
             )

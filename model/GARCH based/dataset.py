@@ -30,8 +30,12 @@ def create_sliding_windows(returns, volatility, seq_len=DEFAULT_SEQ_LEN):
     for i in range(max_start):
         r_window = r.iloc[i : i + seq_len]
         v_window = v.iloc[i : i + seq_len]
-        target_r = r.iloc[i + seq_len + horizon - 1]
-        target_v = v.iloc[i + seq_len + horizon - 1]
+        # Forecast origin is the final observed return in the encoder.
+        # The target volatility is computed from strictly future returns;
+        # ``v`` is only the historical causal decoder feature.
+        target_r = r.iloc[i + seq_len]
+        future_returns = r.iloc[i + seq_len : i + seq_len + horizon]
+        target_v = np.std(future_returns, ddof=0)
         
         # Skip windows with any NaN values
         if r_window.isna().any() or v_window.isna().any() or pd.isna(target_r) or pd.isna(target_v):
