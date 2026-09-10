@@ -243,6 +243,59 @@ def evaluate_lambda_sweep(input_dir: Path, output_dir: Path, alpha: float = 0.01
         fig2.savefig(output_dir / "accuracy_risk_frontier_lambda_vs_c.png", dpi=300)
         plt.close(fig2)
 
+        # 6. Per-model Frontier Plots (Reviewer 1 explicitly requested single-backbone frontier, e.g. Moirai 2)
+        summary_by_model = (
+            out.groupby(["model", "method", "lambda_var"], dropna=False)
+            .agg(
+                cases=("mse", "size"),
+                mean_scale=("scale_factor", "mean"),
+                mse=("mse", "mean"),
+                pinball=("pinball", "mean"),
+                violation_rate=("violation_rate", "mean"),
+            )
+            .reset_index()
+        )
+        summary_by_model.to_csv(output_dir / "lambda_vs_rescaling_by_model.csv", index=False)
+
+        for model_name in sorted(out["model"].unique()):
+            sub_curves = df_curves[df_curves["model"] == model_name]
+            sub_trained = summary_by_model[(summary_by_model["model"] == model_name) & (summary_by_model["method"] == "trained_lambda")].sort_values("lambda_var")
+            sub_ctrl_rows = summary_by_model[(summary_by_model["model"] == model_name) & (summary_by_model["method"] == "rescaled_lambda_0")]
+            if sub_curves.empty or sub_trained.empty or sub_ctrl_rows.empty:
+                continue
+
+            sub_ctrl = sub_ctrl_rows.iloc[0]
+            sub_c_frontier = sub_curves.groupby("param_value").agg(mse=("mse", "mean"), pinball=("pinball", "mean")).reset_index().sort_values("mse")
+
+            fig_m, ax_m = plt.subplots(figsize=(8, 5.5))
+            ax_m.plot(sub_c_frontier["mse"], sub_c_frontier["pinball"], "--", color="#7f7f7f", linewidth=2.0, label=r"Scalar Rescaling Frontier ($c \times \hat{\sigma}_{\lambda=0}$)")
+            ax_m.plot(sub_trained["mse"], sub_trained["pinball"], "o-", color="#1f77b4", linewidth=2.2, markersize=8, label=rf"MoiraiVaR {model_name} Frontier")
+
+            for _, row in sub_trained.iterrows():
+                ax_m.annotate(
+                    f"$\\lambda={row['lambda_var']:g}$",
+                    (row["mse"], row["pinball"]),
+                    xytext=(6, 4),
+                    textcoords="offset points",
+                    fontsize=9,
+                    fontweight="medium",
+                )
+
+            ax_m.plot(sub_ctrl["mse"], sub_ctrl["pinball"], "*", color="#d62728", markersize=13, label=f"Validation-tuned $c^*={sub_ctrl['mean_scale']:.2f}$")
+            ax_m.set_xlabel("Multi-Horizon Volatility MSE (lower is better)", fontsize=11)
+            ax_m.set_ylabel(f"Test VaR {int(alpha*100)}% Pinball Loss (lower is better)", fontsize=11)
+            ax_m.set_title(rf"Accuracy--Risk Frontier: {model_name} ($\lambda$-Frontier vs $c$-Rescaling)", fontsize=12, fontweight="bold")
+            ax_m.grid(alpha=0.3)
+            ax_m.legend(frameon=True, loc="upper right")
+            fig_m.tight_layout()
+            
+            fig_m.savefig(output_dir / f"accuracy_risk_frontier_{model_name}.png", dpi=300)
+            if model_name == "moirai2":
+                iceba_fig = Path("ICEBA-paper/fig_lambda_vs_rescaling_frontier.png")
+                iceba_fig.parent.mkdir(parents=True, exist_ok=True)
+                fig_m.savefig(iceba_fig, dpi=300)
+            plt.close(fig_m)
+
     print(f"Successfully generated lambda ablation results in: {output_dir}")
     print(summary.to_string(index=False))
 
