@@ -521,6 +521,7 @@ def main(families: str = "garch,transformer,moirai,moiraivar,hybrid,wavelet", ou
             # Weights are persisted in the Modal Volume (not in the in-memory
             # return zip) and downloaded separately to avoid MemoryError.
             import subprocess
+            import sys
             local_weights = local_run_dir / family / Path(weight_paths[family]).relative_to(family)
             local_weights.mkdir(parents=True, exist_ok=True)
             subprocess.run(

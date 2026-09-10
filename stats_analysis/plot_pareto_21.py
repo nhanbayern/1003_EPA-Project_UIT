@@ -16,8 +16,11 @@ import pandas as pd
 
 
 ROOT = Path(__file__).resolve().parents[1]
-INPUT = ROOT / "output" / "mcdm_results" / "MCDM20260729001458" / "5,5" / "SAWRanking.csv"
+_candidates = sorted((ROOT / "output" / "mcdm_results").glob("*/5,5/SAWRanking.csv"))
+INPUT = _candidates[-1] if _candidates else ROOT / "output" / "mcdm_results" / "MCDM20260729001458" / "5,5" / "SAWRanking.csv"
 OUTPUT = ROOT / "Springer_Conference_Proceedings_Template_Updated_2022_01_12" / "fig_accuracy_risk_pareto.png"
+ICEBA_OUTPUT = ROOT / "ICEBA-paper" / "fig_accuracy_risk_pareto.png"
+PAPER_OUTPUT = ROOT / "paper - Copy" / "fig_accuracy_risk_pareto.png"
 
 
 def pareto_mask(frame: pd.DataFrame) -> pd.Series:
@@ -92,9 +95,14 @@ def main() -> None:
     ax.grid(alpha=0.25)
     ax.legend(loc="lower right", frameon=True)
     fig.tight_layout()
+    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUTPUT, dpi=300, bbox_inches="tight")
+    ICEBA_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(ICEBA_OUTPUT, dpi=300, bbox_inches="tight")
+    if PAPER_OUTPUT.parent.exists():
+        fig.savefig(PAPER_OUTPUT, dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print(f"Saved {OUTPUT}")
+    print(f"Saved {OUTPUT} and {ICEBA_OUTPUT}")
     print(f"Configurations: {len(frame)}; Pareto non-dominated: {int(frame['pareto'].sum())}")
 
 

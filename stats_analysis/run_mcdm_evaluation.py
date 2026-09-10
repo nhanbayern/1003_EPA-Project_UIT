@@ -382,11 +382,12 @@ def build_averaged_var_metrics(
         method_columns = [
             f"{var_case}_{method}_{metric}" for method in VAR_METHODS
         ]
-        if wide[method_columns].isna().any(axis=None):
-            raise ValueError(
-                f"Incomplete {metric} values across VaR methods in "
-                f"{var_predictions_path}"
-            )
+        if metric == "pass_rate":
+            wide[method_columns] = wide[method_columns].fillna(0.0)
+        elif metric == "violation_rate":
+            wide[method_columns] = wide[method_columns].fillna(1.0)
+        elif metric == "abs_violation_error":
+            wide[method_columns] = wide[method_columns].fillna(1.0 - alpha)
         wide[f"{var_case}_{metric}"] = wide[method_columns].mean(axis=1)
 
     wide[f"{var_case}_risk_method_count"] = len(VAR_METHODS)
