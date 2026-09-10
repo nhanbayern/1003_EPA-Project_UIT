@@ -1,147 +1,142 @@
-# Volatility forecasting pipeline audit
+# ICEBA Codebase Scientific-Setup Audit
 
-**Audit date:** 2026-09-10  
-**Scope:** the requested research workspace and existing `output/final/` artifacts.  
-**Mode:** read-only audit; no source or result files were modified or deleted.
-
-## Protocol audited
-
-For an origin `t`, `lookback=60` means `X_t = r[t-59:t+1]`. For horizon `h`, the future target is `r[t+1:t+h+1]` and the requested realized volatility is `std(r[t+1:t+h+1])`. Output `time` is the timestamp at `t`, and `log_return=r[t+1]`. Therefore `h=1,3,5,10,21` means respectively the next 1, 3, 5, 10 and 21 observations after the origin—not a backward/offset rolling window.
+**Date:** 2026-09-10  
+**Commit audited:** `6030acb` (`fix: prevent volatility target leakage`)  
+**Scope:** codebase, notebooks, data builders, split/evaluation logic, manifests, and representative output artifacts. Paper prose was used only to identify the intended experiment contract; this is not a paper-writing review.  
+**Mutation policy:** read-only audit. No source, notebook, CSV, model, Modal job, or historical artifact was changed.
 
 ## Executive verdict
 
-**BLOCKED: do not retrain or publish/compare the existing benchmark yet.** The core Transformer, modified-Autoformer and MoiraiVaR data builders use a backward-looking rolling target that overlaps the input. The Modal notebook-preparation code also injects that same wrong formula into legacy notebooks. This invalidates realized-volatility labels and all downstream MSE/MAE/QLIKE, VaR, MCDM and model-ranking results derived from those artifacts. GARCH export alignment is also not proven correct and should be rebuilt under one canonical origin-aligned schema.
+**BLOCKER — the experiment is not yet scientifically ready for retraining or reporting.**
 
-## Findings table
+The latest commit corrected the main Python target builders, but the codebase is not yet one reproducible experiment. There are still incompatible target definitions across active/stale pipelines, no end-to-end proof that every family uses the same split/origin contract, and the available benchmark artifacts were generated before the correction.
 
-| Pipeline | File | Dòng/công thức | Trạng thái | Mức độ | Hệ quả |
-| --- | --- | --- | --- | --- | --- |
-| Moirai baseline | `experiments/all_models_modal/modal_app.py` | 243–248; notebook rewrite changes target/export cells | WARNING | HIGH | The runner mutates a prepared copy, but baseline notebook source itself was not fully audited from Python-only files. Must verify generated notebook uses canonical future target before reuse. |
-| Moirai baseline | `experiments/all_models_modal/modal_app.py` | 151–159, 179–193 | WARNING | MEDIUM | Normalizer assumes transformer/Moirai exports already contain origin `t` and `r[t+1]`; no assertion checks timestamp-to-dataset calendar mapping. |
-| MoiraiVaR | `experiments/moirai_var_aware/data.py` | 36–42: `x=r[t-59:t+1]`, but `target_window=r[t+h-60:t+h]` | **FAIL / BLOCKER** | CRITICAL | Target overlaps input for every h; h=1 is effectively a backward window ending at `t`, not `r[t+1]`. All MoiraiVaR forecasts/losses are invalid under the requested protocol. |
-| MoiraiVaR | `experiments/moirai_var_aware/data.py` | 48 | PASS | MEDIUM | `log_return` is explicitly `returns[t+1]`, subject to the target/output rows being regenerated with the corrected target. |
-| MoiraiVaR split | `experiments/moirai_var_aware/data.py` | 73–88 | WARNING | HIGH | Uses `origin_position` and `end-max_horizon`, which is directionally a purge, but `origin_position` is the enumeration position of valid indices, not the raw return index. This needs an assertion and exact boundary test. |
-| Transformer v1 | `model/transformer based/version_1/dataset.py` | 26, 36, 44–50 | **FAIL / BLOCKER** | CRITICAL | Input is `returns[t-60:t]` (ends at `t-1`), while target window is `returns[t+h-60:t+h]`; it overlaps input and is shifted relative to the stated origin convention. `y_ret` is also `returns[t+h-1]`, not consistently `r[t+h]`. |
-| Transformer v2 | `model/transformer based/version_2/dataset.py` | 26, 36, 40–43 | **FAIL / BLOCKER** | CRITICAL | Input is origin-inclusive, but volatility target is the same overlapping backward formula. Return target is future-aligned (`t+1:t+h+1`), creating an inconsistent joint target. |
-| GARCH-LSTM Hybrid | `model/GARCH based/dataset.py` | 30–43 | WARNING | HIGH | Sliding target is one-step-ahead, but `prepare_series` creates a shifted past volatility and the caller splits on raw close positions. Semantics may be causal for h=1, but this is not demonstrated for common multi-horizon outputs. |
-| GARCH-LSTM Hybrid export | `model/GARCH based/utils.py` | 102–123 | **FAIL / BLOCKER** | CRITICAL | Export reconstructs `target_window=joined[target_end-60:target_end]`, excluding the endpoint and using a concatenated history whose exact index is not asserted. It does not directly compute `std(future_returns[i:i+h])`; existing `actual_vol` cannot be trusted without rebuild. |
-| GARCH-Autoformer | `model/modify_autoformer/Hybrid GARCH-Autoformer/dataset.py` | 36–42 | **FAIL / BLOCKER** | CRITICAL | Same overlapping target formula as Transformer v2. GARCH features may be causal, but the supervised label is invalid. |
-| Wavelet-Autoformer | `model/modify_autoformer/Wavelet Transform/dataset.py` | 36–43 | **FAIL / BLOCKER** | CRITICAL | Same overlapping target formula as Transformer v2. Wavelet preprocessing cannot rescue an invalid target. |
-| GARCH/GJR/FI-GARCH | `model/GARCH based/utils.py` | 57–75 | WARNING | HIGH | `volatility=returns.rolling(60).std().shift(1)` is causal for a volatility-at-time feature, but it is a different object from requested future realized volatility. Evaluation must recompute labels from future returns, not reuse this feature. |
-| AAAI24 GARCH/NN reproduction | `AAAI24_GARCH_NN_Reproduction/core/data_processor.py` | 109–120, 167–172 | WARNING | HIGH | Rolling volatility is computed from historical returns and split after preprocessing; this can be valid as a feature, not as the requested future target. Split boundaries and one-step target alignment require a dedicated corrected evaluator. |
-| AAAI24 windows | `AAAI24_GARCH_NN_Reproduction/core/data_processor.py` | 177–240 | WARNING | HIGH | Single-horizon target uses `r[i+seq_len+h-1]`; multi-horizon target uses precomputed `v[i+seq_len+h-1]`. This is not demonstrably `std(r[t+1:t+h+1])` and has no explicit origin timestamp contract. |
-| Modal target injection | `experiments/all_models_modal/modal_app.py` | 241–245: replaces future RMS with `target_window=r[t+h-lookback:t+h]` | **FAIL / BLOCKER** | CRITICAL | Modal retraining would reproduce the leakage in prepared notebooks. The orchestration layer itself must be fixed before any retrain. |
-| Modal export | `experiments/all_models_modal/modal_app.py` | 247–252 | WARNING | HIGH | Export rewrite attempts to set `origin_time=df.time[t]` and `next_return=df.log_return[t+1]`, but uses text replacement rather than a typed schema/assertion. A missed notebook variant can silently keep old semantics. |
-| Normalization | `experiments/all_models_modal/modal_app.py` | 93–201 | WARNING | HIGH | Column normalization is mostly schema-preserving, but it trusts source `time`, `horizon`, `log_return`, and true-volatility columns. There are no checks for origin mapping, duplicate `(dataset,branch,tier,model,time,horizon)` keys, or target recomputation. |
-| Student-t ν | `stats_analysis/risk.py` | 1–31 | WARNING | HIGH | `stats.t.fit(arr)` is available, but this file alone does not prove `arr` is train-only. The audit found no global contract/assertion tying ν fitting to the training split. Existing ν artifacts must be traced and regenerated train-only. |
-| FHS | `stats_analysis/risk.py` | 97–119 | PASS (conditional) | MEDIUM | Residual quantile uses `shift(1).rolling(...)`, which excludes the current observation and is causal if the input residual stream is origin-aligned. It is not safe if the upstream `log_return`/volatility rows are misaligned. |
-| Normal VaR | `stats_analysis/risk.py` | 61–66 | PASS (conditional) | MEDIUM | Correct quantile transformation for a supplied origin-aligned volatility forecast; horizon semantics remain conditional on the row's `r[t+1]`. |
-| Student-t VaR | `stats_analysis/risk.py` | 75–85 | PASS (conditional) | MEDIUM | Standardized-t variance correction is present. ν provenance remains unresolved; do not treat current results as clean until ν is proven train-only. |
-| VaR evaluation | `stats_analysis/run_mcdm_evaluation.py` | 295–331 | WARNING | HIGH | Violations compare `log_return` to VaR thresholds by case. This is correct only when `log_return=r[t+1]`; no runtime assertion checks it, and h>1 rows can otherwise be misinterpreted. |
-| Metrics | `ultility/metrics.py` and `stats_analysis/run_mcdm_evaluation.py` | `compute_mse_qlike`; case aggregation | **FAIL / BLOCKER** | CRITICAL | Metrics consume stored `true_volatility`; because core labels are overlapping historical windows, MSE/MAE/QLIKE are not measurements of future realized volatility. |
-| MCDM SAW | `stats_analysis/run_mcdm_evaluation.py` | 570–612 | WARNING | HIGH | Min-max normalization is computed over the decision matrix; this is acceptable for descriptive ranking but must be frozen on a predeclared case/model set. No evidence here that test data was not used to choose weights/model. |
-| MCDM TOPSIS | `stats_analysis/run_mcdm_evaluation.py` | 615–675 | WARNING | HIGH | Same issue: ideal best/worst and normalization use the supplied matrix. Need an explicit train/validation selection stage and untouched test ranking stage. |
-| Constant-forecast filter | `stats_analysis/run_mcdm_evaluation.py` | 678–710 | PASS (conditional) | MEDIUM | Eligibility checks std-ratio error and tracking correlation, so near-constant forecasts are screened. Threshold and scope need to be predeclared and applied identically across cases. |
-| MCDM common set | `stats_analysis/run_mcdm_evaluation.py` | 541–549, 666–675 | WARNING | HIGH | Inner merges enforce common rows across VaR cases and SAW/TOPSIS, but no audit manifest proves the same model/case set was fixed before test results were seen. |
-| Dataset names | `experiments/all_models_modal/modal_app.py`; `model/GARCH based/utils.py` | `_dataset_key`, `_normalize_dataset_name` | WARNING | MEDIUM | Multiple normalization conventions exist (`snp500`, filename stems, family prefixes). Add a single canonical dataset registry and reject unknown aliases. |
-| CSV keys | sampled `output/final/.../*_predictions.csv` | programmatic read-only scan | WARNING | MEDIUM | In the first 200 prediction CSVs checked, no duplicate keys were detected under available schema columns; this is not a proof for all files, and current key uniqueness is not enforced in loaders. |
-| Existing horizons | sampled `output/final/...` | programmatic read-only scan | WARNING | HIGH | Wavelet artifacts expose `[1,3,5,10,21]`, but their labels are generated by the overlapping formula. Horizon names exist; horizon semantics are invalid until labels are rebuilt. |
+Strong evidence:
 
-## Horizon mapping audit
+- `output/canonical_final_audited_normalized_v2/merged_all_predictions.csv` was generated at 15:42, before commit `6030acb` at 16:27.
+- Its first DAX row (`time=2022-03-08`, `h=1`) has `true_volatility=1.53598266`.
+- From `dataset/DAX_40.csv`, the correct future h=1 standard deviation is `0.0` (`ddof=0`); `1.53598266` is the old backward rolling target.
 
-Under the requested protocol:
+Thus existing model metrics, VaR results, statistical summaries, MCDM rankings, plots, and winners must not be treated as results from the corrected experiment.
 
-| h | Future returns | Correct target | VaR return |
-|---:|---|---|---|
-| 1 | `r[t+1]` | `std([r[t+1]])` (usually 0 with `ddof=0`) | `r[t+1]` |
-| 3 | `r[t+1:t+4]` | `std(r[t+1:t+4])` | `r[t+1]` |
-| 5 | `r[t+1:t+6]` | `std(r[t+1:t+6])` | `r[t+1]` |
-| 10 | `r[t+1:t+11]` | `std(r[t+1:t+11])` | `r[t+1]` |
-| 21 | `r[t+1:t+22]` | `std(r[t+1:t+22])` | `r[t+1]` |
+## Scientific setup contract used
 
-The repeated implementation `returns[t+h-lookback:t+h]` instead represents a backward 60-observation window ending at `t+h-1`; it overlaps the input for all h≤60. It must not be described as future realized volatility.
-
-## Blocker list
-
-1. Correct the target construction in MoiraiVaR, Transformer v1/v2, GARCH-Autoformer and Wavelet-Autoformer.
-2. Remove the wrong target injection in Modal notebook preparation.
-3. Rebuild GARCH/AAAI24 evaluation labels and exports from the canonical future-return formula; do not reuse existing `actual_vol`/`true_volatility` columns.
-4. Rebuild all derived metrics, VaR tables, statistical tests, SAW/TOPSIS rankings and consolidated results after corrected predictions exist.
-5. Establish train-only provenance for scaler parameters and Student-t ν; current source inspection does not establish this end-to-end.
-
-## Files that need correction before retraining
-
-- `experiments/moirai_var_aware/data.py`
-- `experiments/all_models_modal/modal_app.py`
-- `model/transformer based/version_1/dataset.py`
-- `model/transformer based/version_2/dataset.py`
-- `model/modify_autoformer/Hybrid GARCH-Autoformer/dataset.py`
-- `model/modify_autoformer/Wavelet Transform/dataset.py`
-- `model/GARCH based/utils.py` and the GARCH evaluation/export caller
-- `AAAI24_GARCH_NN_Reproduction/core/data_processor.py` and its evaluation caller
-- the canonical evaluation/normalization layer under `stats_analysis/`
-
-## Correct code/formula proposal
+For forecast origin `t`, lookback 60, and horizon `h`:
 
 ```python
-# origin t, lookback=60
-x = returns[t - lookback + 1 : t + 1]
+x = returns[t - 59 : t + 1]
 future = returns[t + 1 : t + h + 1]
-assert len(x) == lookback
-assert len(future) == h
 target_vol = np.std(future, ddof=0)
-log_return = returns[t + 1]
 time = timestamps[t]
+log_return = returns[t + 1]
 ```
 
-For a split boundary, generate windows in global time but assign a sample to a split only when its origin and every target observation are inside that split's allowed evaluation interval. If the split is defined by origin ranges, purge at least `max_horizon` origins at the end of train/validation, and assert `max(target_indices) < next_split_start`.
+Input and target index sets must be disjoint. The VaR observation is always `r[t+1]`. Valid horizons are `{1, 3, 5, 10, 21}`.
 
-## Do we need to retrain Modal?
+## Inventory and verification performed
 
-**Yes, if the goal is a valid benchmark under this protocol.** Existing neural predictions should be treated as contaminated by invalid labels; rerunning only metrics is insufficient. Modal should be retrained only after target/export/schema assertions pass locally on a tiny synthetic series.
+- Inspected `experiments/`, `model/`, `AAAI24_GARCH_NN_Reproduction/`, `stats_analysis/`, `ultility/`, `dataset/`, and `output/`.
+- Inspected required audit/reproduction notes under `docs/audit/` and `docs/modal/`.
+- Parsed 102 Python files with `ast.parse`; zero syntax errors.
+- Inspected notebook code cells directly.
+- Counted 2,962 CSV files below `output/`.
+- Inspected three versioned merged artifacts structurally and by raw-data recomputation.
+- Ran an in-memory monotonic synthetic-series contract check.
+- Inspected Git status, history, blame, and target-fix commits.
 
-## Results that must be discarded
+## Findings
 
-Discard or mark non-comparable every result whose `true_volatility` was generated by the overlapping formula, including existing MoiraiVaR, Transformer v1/v2, GARCH-Autoformer and Wavelet-Autoformer prediction CSVs; all dependent MSE/MAE/QLIKE tables; VaR backtests based on those rows; and SAW/TOPSIS/consolidated winners derived from them. GARCH/AAAI24 artifacts remain **unverified**, not publishable, until their actual-volatility alignment is reconstructed.
+| Area | Concrete code/artifact | Evidence | Status | Severity | Consequence | Required action |
+|---|---|---|---|---|---|---|
+| Main target builders | `experiments/moirai_var_aware/data.py:36-48`; Transformer v1/v2; hybrid/wavelet datasets | Main Python builders now use future `std` and `log_return=r[t+1]`. | PASS (source only) | Medium | No regenerated result proves the corrected source was used. | Add runtime assertions and rebuild. |
+| Moirai baseline | `model/Morai based/notebooks/kaggle_notebook.ipynb`, cell 4 lines 31-40 | Uses `sqrt(mean(future_returns**2))` (RMS), not future standard deviation. | FAIL | BLOCKER | Baseline and MoiraiVaR solve different target tasks. | Align/remove baseline, then retrain. |
+| Moirai stale source | `model/Morai based/notebooks/kaggle_notebook.py:69-80` | Uses `returns[t+h-lookback:t+h]`, a backward rolling window. | FAIL | BLOCKER | Regeneration can reintroduce target overlap. | Align source/generator/notebook and test parity. |
+| Legacy Moirai notebook | `model/Morai based/notebooks/1003-moirai-based-models.ipynb`, cell 4 lines 28-43 | Input is shifted; target is backward/offset; `log_return` is `returns[t]`. | FAIL | BLOCKER | Wrong origin, target overlap, and wrong VaR return. | Exclude or repair completely. |
+| AAAI24/GARCH-NN target | `AAAI24_GARCH_NN_Reproduction/core/data_processor.py:109-125,177-240` | Uses historical rolling volatility and `v[i+seq_len+h-1]`; does not compute future `std(r[t+1:t+h+1])`. | FAIL | BLOCKER | Econometric baselines are not comparable. | Rebuild labels/evaluator from raw returns. |
+| GARCH exporter | `model/GARCH based/utils.py:92-129` | Current export computes future `std`, but docstring lines 95-97 still describes offset rolling volatility; caller alignment is not asserted. | WARNING | High | Correct source may still emit misaligned artifacts. | Remove stale semantics; assert calendar/index mapping. |
+| Modal preparation | `experiments/all_models_modal/modal_app.py:233-253` | Corrects one exact text pattern and sets origin/next return via string replacement. | WARNING | High | Unmatched notebook variants can silently remain incompatible. | Use a shared builder and assert prepared notebook contents. |
+| Split/purge | `experiments/moirai_var_aware/data.py:65-89`; notebook generators | Moirai purges by `origin_position`; other notebooks borrow 60 context rows and rely on local truncation. | WARNING | High | Split semantics are implicit and not uniformly auditable. | Emit raw origin/target indices and assert boundaries. |
+| Split counts | `model/transformer based/version_2/create_notebook_v2.py:240-264` | Counts are applied after filtering/dropna; no fail-closed count check. | WARNING | High | Actual populations can differ by market/family. | Publish retained counts and reject mismatches. |
+| DAX split example | `dataset/DAX_40.csv` plus current split code | Raw rows 4,567; valid origins 4,038; fixed counts sum to 4,059. Current selection retains 951 test origins vs declared 972. | WARNING | High | Benchmark population is not the declared population. | Freeze a per-dataset split manifest. |
+| Target artifact | `output/canonical_final_audited_normalized_v2/merged_all_predictions.csv` | DAX h=1 stores old rolling target 1.53598266 instead of future h=1 std 0.0; artifact predates latest fix. | FAIL | BLOCKER | All dependent metrics/risk/ranks are invalid for the corrected task. | Quarantine and regenerate. |
+| Benchmark size | Same artifact vs ICEBA run specification | Current merge has 2,566,350 rows and 41 configurations across 9 datasets; stored ICEBA claim is 1,322,330 rows and 26 configurations. | FAIL | High | Available output is a different experiment population. | Freeze one config manifest and rebuild. |
+| Truth consistency | Current v2 merged artifact | No duplicate full keys, but 41,530 `(dataset,time,horizon)` truth groups differ across configurations; max target difference about `2.15e-7`. | WARNING | Medium | Common truth is not proven by the artifact itself. | Re-run merger validation after rebuild and document tolerance. |
+| Student-t training | `experiments/moirai_var_aware/losses.py:17-23,53-62` | Standardized Student-t factor `sqrt((nu-2)/nu)` is present. | PASS (source only) | Medium | Old runs used older conventions. | Persist `nu`, formula version, and commit hash. |
+| Student-t `nu` | `experiments/moirai_var_aware/runner.py:59-67`; `stats_analysis/analyzer.py:99-119` | Runner uses train samples; analyzer uses train source for fixed datasets but can fall back to merged rows if source is unavailable. | WARNING | High | Fallback may fit `nu` using test rows. | Fail closed; persist `nu_source_split=train`. |
+| FHS | `stats_analysis/risk.py:97-119` | Residual history uses rows before current `t`. | PASS (conditional) | Medium | Depends on upstream row alignment. | Require canonical origin metadata before FHS. |
+| VaR evaluation | `stats_analysis/risk.py:75-85,188-227` | Student-t correction and violation comparison exist. | PASS (conditional) | Medium | Depends on `r[t+1]`, train-only `nu`, and rebuilt rows. | Add a preflight contract validator. |
+| MCDM selection | `stats_analysis/run_mcdm_evaluation.py:541-550,570-675,1099-1109` | SAW/TOPSIS use the supplied merged evaluation matrix; validation-only selection is not required. | FAIL | BLOCKER | Test-set ranking can become model selection. | Freeze eligibility/weights/model set on validation; rank test once. |
+| Lambda/rescaling control | `experiments/moirai_var_aware/evaluate_lambda_sweep.py:18-23,35-56` | Rescaling factor is fit on validation and scored on test; code supports `{0,.05,.1,.2,.5,1}`. | PASS (implementation) | Medium | No corrected post-fix run is evidenced. | Run and archive after rebuild. |
+| Reproducibility provenance | `stats_analysis/merge_canonical_predictions.py:124-140` | Manifest stores hashes/commit/seeds/command, but rows lack mandatory origin index, target indices, scaler fit range, `nu` range, and selection split. | WARNING | High | Later audit cannot prove how each row was generated. | Extend manifest/schema and make fields mandatory. |
 
-## Benchmark-after-fix plan
+## Per-pipeline scientific decision
 
-1. Add canonical sample generation and run synthetic index tests for h=1,3,5,10,21.
-2. Rebuild each family with identical origin, horizon and split manifests.
-3. Fit every scaler only on train observations; serialize fit range/mean/scale and assert no validation/test rows were passed to `fit`.
-4. Fit Student-t ν on train residuals/returns only; store `nu_source_split=train` in artifacts.
-5. Generate predictions with one schema and validate origin timestamp, `r[t+1]`, target values, horizon, and unique key.
-6. Compute MSE/MAE/QLIKE against recomputed future realized volatility only.
-7. Run Normal, Student-t and FHS VaR using `r[t+1]`; FHS residual windows must be strictly prior to the origin.
-8. Select hyperparameters/lambda/weights on validation only. Freeze the model/case set and MCDM weights before one final test evaluation.
-9. Run statistical tests and SAW/TOPSIS on the frozen, common case set; archive manifests and hashes.
+| Pipeline | Decision |
+|---|---|
+| Moirai | **BLOCKED:** active variants use RMS or rolling targets. |
+| MoiraiVaR | **Source corrected, experiment unverified:** retrain and add provenance. |
+| Transformer v1/v2 | **Source corrected, experiment unverified:** split/output assertions missing. |
+| GARCH-LSTM | **Not comparable yet:** exporter is closer to contract, but caller alignment/artifacts are unverified. |
+| GARCH-Autoformer | **Source corrected, experiment unverified:** split assertions absent. |
+| Wavelet-Autoformer | **Source corrected, experiment unverified:** old artifacts must be rebuilt. |
+| GARCH/GJR/FI-GARCH and AAAI24 | **Blocked:** current reproduction target is historical rolling volatility. |
+| Modal | **Blocked pending local preflight:** text patch is brittle. |
+| VaR | **Conditionally sound in source:** Student-t/FHS logic is plausible; row and parameter provenance unresolved. |
+| MCDM | **Blocked for model-selection claims:** no enforced validation-only gate. |
 
-## Assertions/tests to prevent recurrence
+## Exact origin/horizon requirements
 
 ```python
+assert len(x) == 60
 assert np.array_equal(x, returns[t-59:t+1])
 assert np.array_equal(future, returns[t+1:t+h+1])
-assert not set(range(t-59, t+1)) & set(range(t+1, t+h+1))
-assert row["time"] == timestamps[t]
-assert row["log_return"] == returns[t+1]
-assert row["target_end_exclusive"] == t+h+1
-assert target_indices.max() < split_end
+assert not set(range(t-59,t+1)) & set(range(t+1,t+h+1))
+assert row.time == timestamps[t]
+assert row.log_return == returns[t+1]
+assert row.target_end_exclusive == t+h+1
+assert max(target_indices) < split_end
 assert scaler_fit_max_index < train_end
 assert nu_source_split == "train"
-assert prediction_df.duplicated(KEY_COLUMNS).sum() == 0
-assert set(prediction_df.horizon.unique()) <= {1,3,5,10,21}
 ```
 
-Also add a test that deliberately compares the implementation output against a hand-built monotonic return sequence; the old overlapping formula must fail that test. Add a manifest field for `origin_index`, `target_indices`, `split`, `scaler_fit_range`, `nu_fit_range`, and `selection_split`.
+## Git-history assessment
 
-## Audit limitations
+- Incompatible target paths entered through the July model/pipeline commits (`984466f`, `17971a8`, `c34fe01`, `a91cb7d`, `d330b28`, `76bba0c`).
+- `623987f` on 2026-09-09 added common-schema/provenance code but retained rolling targets.
+- `08276c2` attempted broad alignment and a lambda sweep but did not make the codebase consistent.
+- `6030acb` on 2026-09-10 corrected the main Python builders, GARCH export, and Modal replacement text.
+- Current state is an **incomplete repair**: stale generators/notebooks, AAAI24 code, and all pre-fix artifacts remain.
 
-This was a read-only static and artifact audit. Notebook code was not executed, Modal was not invoked, and the full output tree was not exhaustively loaded into memory. The sampled duplicate scan covered the first 200 matching prediction CSVs and found no duplicate keys under the available columns; this is an advisory check, not a PASS for the entire artifact tree.
+## Required repair sequence before a valid experiment
 
-## Decision gate
+1. Import one target builder from every active family; remove/repair RMS, rolling, and shifted Moirai/AAAI24 paths.
+2. Add monotonic synthetic tests and source-vs-notebook/Modal parity tests.
+3. Add split manifests with raw origin/target indices, retained counts, and purge status.
+4. Verify train-only scaler and Student-t `nu` provenance.
+5. Rebuild every prediction after the target fix.
+6. Recompute truth from raw close prices; validate common keys before merging.
+7. Select models, lambda, thresholds, eligibility, and weights using validation only.
+8. Run one final frozen test evaluation, then generate metrics, VaR, statistics, and MCDM.
 
-**Audit decision before remediation: BLOCKER — no retrain.** The requested remediation has now been applied to the source data builders/export layer, but existing artifacts remain invalid and must not be reused. Modal retraining/rebuild still requires a separate execution approval after the post-fix tests pass.
+## Artifacts that must not be reused
 
-## Remediation applied after the audit
+Quarantine rather than overwrite:
 
-The following source files were updated after the read-only audit: MoiraiVaR, Transformer v1/v2, GARCH-Autoformer, Wavelet-Autoformer, GARCH CSV export, and Modal notebook preparation. They now use `x=returns[t-59:t+1]`, `future=returns[t+1:t+h+1]`, `std(future, ddof=0)`, and `log_return=returns[t+1]`. Existing CSV outputs were deliberately not modified.
+- `output/09-09-2026/`
+- `output/canonical_final/`
+- `output/canonical_final_audited_normalized/`
+- `output/canonical_final_audited_normalized_v2/`
+- dependent `output/stats_analysis/`, FHS, winners, plots, and MCDM outputs
+
+These may remain as legacy evidence, but not as corrected benchmark results.
+
+## Limitations
+
+- Torch is unavailable locally, so dataset classes were statically inspected and formulas checked in memory; no full model runtime was executed.
+- Modal was not invoked and no model was retrained.
+- CSV review used structural scans plus targeted raw-data recomputation; it did not load all 2,962 files simultaneously.
+
+## Mandatory decision gate
+
+**HOLD — REPAIR REQUIRED**
+
