@@ -71,8 +71,9 @@ class VolatilityDataset(Dataset):
             x = self.returns[t - lookback + 1: t + 1]
             y = []
             for h in horizons:
-                future_returns = self.returns[t + 1: t + h + 1]
-                y.append(np.std(future_returns, ddof=0))
+                target_position = t + h
+                target_window = self.returns[target_position - lookback + 1: target_position + 1]
+                y.append(np.std(target_window, ddof=0))
             self.samples.append({
                 'x': torch.tensor(x, dtype=torch.float32),
                 'y': torch.tensor(y, dtype=torch.float32),

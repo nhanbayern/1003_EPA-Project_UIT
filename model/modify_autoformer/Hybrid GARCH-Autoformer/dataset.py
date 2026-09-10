@@ -36,7 +36,7 @@ class VolatilityDataset(Dataset):
         x = self.garch_z[t - self.lookback + 1 : t + 1]
         
         y_vol = np.array([
-            np.std(self.returns[t + 1 : t + h + 1], ddof=0)
+            np.std(self.returns[t + h - self.lookback + 1 : t + h + 1], ddof=0)
             for h in range(1, self.horizon + 1)
         ], dtype=np.float32)
         y_ret = self.returns[t + 1 : t + self.horizon + 1]

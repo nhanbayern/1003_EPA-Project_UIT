@@ -2,7 +2,7 @@
 
 Every input row must already use the project schema and the same causal
 definition: origin time t, log_return=r[t+1], and future realized population
-standard-deviation target ``std(r[t+1:t+h+1], ddof=0)``.
+rolling-60 volatility target evaluated at the future endpoint ``t+h``.
 The merger intentionally retains only keys observed for *every* configuration;
 it never pads or imputes a missing forecast.
 """

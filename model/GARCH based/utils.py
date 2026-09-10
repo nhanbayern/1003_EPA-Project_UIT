@@ -100,15 +100,16 @@ def save_predictions_csv(index_name, model_name, predictions_dict, origin_times,
     """
     Save forecasts using the shared causal evaluation schema.
 
-    Each row is indexed by forecast origin ``t``.  For horizon ``h`` the
-    realized target is ``std(r[t+1:t+h+1], ddof=0)`` and ``log_return`` is the
-    first unseen return ``r[t+1]``.  Historical rolling volatility is never
-    used as the evaluation target.
+    Each row is indexed by forecast origin ``t``. For horizon ``h`` the
+    realized target is rolling ``std(60)`` at endpoint ``t+h`` and
+    ``log_return`` is the first unseen return ``r[t+1]``.
     """
     records = []
     horizons = sorted(list(predictions_dict.keys()))
 
     future_arr = np.asarray(future_returns, dtype=float)
+    history_arr = np.asarray(history_returns if history_returns is not None else [], dtype=float)
+    combined_returns = np.concatenate([history_arr, future_arr])
     origin_arr = np.asarray(origin_times)
     if len(origin_arr) != len(future_arr):
         raise ValueError(
@@ -127,7 +128,9 @@ def save_predictions_csv(index_name, model_name, predictions_dict, origin_times,
         
         for i in range(valid_len):
             realized = future_arr[i:i + h]
-            true_vol = np.std(realized, ddof=0) if np.isfinite(realized).all() else np.nan
+            end_position = len(history_arr) + i + h - 1
+            target_window = combined_returns[end_position - 59:end_position + 1]
+            true_vol = np.std(target_window, ddof=0) if len(target_window) == 60 and np.isfinite(target_window).all() else np.nan
             time_val = origin_arr[i]
             log_ret = realized[0] if len(realized) else np.nan
             

@@ -41,8 +41,8 @@ class VolatilityDataset(Dataset):
         y_ret = np.zeros(self.horizon, dtype=np.float32)
         
         for h in range(1, self.horizon + 1):
-            # Target volatility is std of strictly future returns r[t+1:t+h+1].
-            window_returns = self.returns[t + 1 : t + h + 1]
+            # Target is rolling volatility at the future endpoint t+h.
+            window_returns = self.returns[t + h - self.lookback + 1 : t + h + 1]
             
             y_vol[h-1] = np.std(window_returns, ddof=0)
             y_ret[h-1] = self.returns[t + h]

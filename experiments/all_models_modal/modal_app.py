@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import sys
 import zipfile
 from datetime import datetime
@@ -278,12 +279,17 @@ def _prepare_notebook(source: Path, destination: Path, output_dir: Path, smoke_t
             f"LAMBDA_VARS = {[float(value.strip()) for value in lambda_sweep.split(',') if value.strip()]}",
         )
         # Legacy notebooks are mounted as immutable inputs. Rewrite their
-        # embedded target/export cells so every Modal family uses the
-        # strictly-future origin-t target. Never inject a backward-looking
-        # target window, which would overlap the input context.
-        text = text.replace(
-            "future_returns = self.returns[t + 1: t + h + 1]\n                y.append(np.sqrt(np.mean(future_returns ** 2)))",
-            "future_returns = self.returns[t + 1: t + h + 1]\n                y.append(np.std(future_returns, ddof=0))",
+        # embedded target/export cells so every Modal family uses the same
+        # rolling-60 target at the future endpoint t+h.
+        rolling_target = (
+            "target_position = t + h\n"
+            "                target_window = self.returns[target_position - 59: target_position + 1]\n"
+            "                y.append(np.std(target_window, ddof=0))"
+        )
+        text = re.sub(
+            r"future_returns = self\.returns\[t \+ 1\s*:\s*t \+ h \+ 1\]\s*\n\s*y\.append\(np\.(?:sqrt\(np\.mean\(future_returns \*\* 2\)\)|std\(future_returns, ddof=0\))\)",
+            rolling_target,
+            text,
         )
         text = text.replace("origin_t = t - 1\n                    origin_time = df['time'].iloc[origin_t] if origin_t >= 0 else None\n                    next_return = df['log_return'].iloc[t] if t < len(df) else None",
                             "origin_time = df['time'].iloc[t] if t < len(df) else None\n                    next_return = df['log_return'].iloc[t + 1] if t + 1 < len(df) else None")
@@ -329,18 +335,17 @@ def _prepare_notebook(source: Path, destination: Path, output_dir: Path, smoke_t
                 baseline_marker + "\n        weights_path = os.path.join('/root/modal_output/moirai/weights', f'{index_name}_{m_type}.pt')\n        os.makedirs(os.path.dirname(weights_path), exist_ok=True)\n        torch.save(model.state_dict(), weights_path)",
                 )
         forbidden_target_fragments = (
-            "target_window = self.returns[t + h - lookback",
-            "target_window=self.returns[t+h-lookback",
             "np.sqrt(np.mean(future_returns ** 2))",
             "target_t = t + h - 1",
+            "np.std(future_returns, ddof=0)",
         )
         stale = [fragment for fragment in forbidden_target_fragments if fragment in text]
         if stale:
             raise ValueError(
                 f"{source.name}: stale target/origin code remains after preparation: {stale}"
             )
-        if "future_returns = self.returns[t + 1: t + h + 1]" in text and "np.std(future_returns, ddof=0)" not in text:
-            raise ValueError(f"{source.name}: future target must use population std (ddof=0)")
+        if "future_returns = self.returns[t + 1: t + h + 1]" in text:
+            raise ValueError(f"{source.name}: stale future-window target remains")
         # Emit structured milestones during the long-running legacy notebooks.
         text = text.replace(
             "for csv_file in csv_files:",
