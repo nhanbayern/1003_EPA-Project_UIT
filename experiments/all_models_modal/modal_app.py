@@ -237,12 +237,13 @@ def _prepare_notebook(source: Path, destination: Path, output_dir: Path, smoke_t
             "LAMBDA_VARS = [0.0, 0.05, 0.1, 0.2, 0.5, 1.0]",
             f"LAMBDA_VARS = {[float(value.strip()) for value in lambda_sweep.split(',') if value.strip()]}",
         )
-        # Legacy notebooks are mounted as immutable inputs.  Rewrite their
-        # embedded target/export cells so every Modal family uses the rolling
-        # 60-day target declared in ICEBA-paper/samplepaper.tex.
+        # Legacy notebooks are mounted as immutable inputs. Rewrite their
+        # embedded target/export cells so every Modal family uses the
+        # strictly-future origin-t target. Never inject a backward-looking
+        # target window, which would overlap the input context.
         text = text.replace(
             "future_returns = self.returns[t + 1: t + h + 1]\n                y.append(np.sqrt(np.mean(future_returns ** 2)))",
-            "target_window = self.returns[t + h - lookback: t + h]\n                y.append(np.std(target_window, ddof=0))",
+            "future_returns = self.returns[t + 1: t + h + 1]\n                y.append(np.std(future_returns, ddof=0))",
         )
         text = text.replace("origin_t = t - 1\n                    origin_time = df['time'].iloc[origin_t] if origin_t >= 0 else None\n                    next_return = df['log_return'].iloc[t] if t < len(df) else None",
                             "origin_time = df['time'].iloc[t] if t < len(df) else None\n                    next_return = df['log_return'].iloc[t + 1] if t + 1 < len(df) else None")

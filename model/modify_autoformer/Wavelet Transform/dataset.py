@@ -35,9 +35,9 @@ class VolatilityDataset(Dataset):
         # Input: raw log returns over lookback window
         x = self.returns[t - self.lookback + 1: t + 1]
 
-        # samplepaper.tex: rolling 60-day standard deviation at offset h.
+        # Origin t uses only r[t]; target is strictly future r[t+1:t+h+1].
         y_vol = np.array([
-            np.std(self.returns[t + h - self.lookback : t + h], ddof=0)
+            np.std(self.returns[t + 1 : t + h + 1], ddof=0)
             for h in range(1, self.horizon + 1)
         ], dtype=np.float32)
         y_ret = self.returns[t + 1: t + self.horizon + 1]

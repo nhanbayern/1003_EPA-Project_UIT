@@ -111,14 +111,10 @@ def save_predictions_csv(index_name, model_name, predictions_dict, origin_times,
             realized = np.asarray(future_returns.iloc[i:i + h]
                                   if isinstance(future_returns, pd.Series)
                                   else future_returns[i:i + h], dtype=float)
-            # The benchmark target is the offset 60-day rolling standard
-            # deviation, not the h-day realized RMS proxy.
-            # With a 60-return origin context ending at t, h=1 targets that
-            # same rolling window; larger h shift its endpoint by h-1.
-            target_end = history_len + i + h - 1
-            target_start = target_end - 60
-            target_window = joined[target_start:target_end]
-            true_vol = np.std(target_window, ddof=0) if len(target_window) == 60 and np.isfinite(target_window).all() else np.nan
+            # Origin-aligned target: only future returns after t are allowed.
+            # `future_returns[i:i+h]` is r[t+1:t+h+1].
+            target_window = realized
+            true_vol = np.std(target_window, ddof=0) if len(target_window) == h and np.isfinite(target_window).all() else np.nan
             time_val = origin_times[i]
             log_ret = realized[0] if len(realized) else np.nan
             
