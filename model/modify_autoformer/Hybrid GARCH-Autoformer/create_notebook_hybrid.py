@@ -104,14 +104,14 @@ def train_model(model, train_loader, val_loader):
 
 # Cell 5: Eval Function
 cells.append(new_code_cell("""\
-def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name):
+def evaluate_and_save(model, loader, df, index_name, model_name, tier_name, split='test'):
     model.eval()
     model.to(DEVICE)
     
     results = []
     
     with torch.no_grad():
-        for x, y_garch, y_vol, y_ret, ts in test_loader:
+        for x, y_garch, y_vol, y_ret, ts in loader:
             x, y_garch = x.to(DEVICE), y_garch.to(DEVICE)
             pred_vol = model(x, y_garch)
             
@@ -140,7 +140,8 @@ def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name)
     
     pred_dir = f'/kaggle/working/results_hybrid/all_predictions/{tier_name}'
     os.makedirs(pred_dir, exist_ok=True)
-    save_path = f'{pred_dir}/{index_name}_{model_name}_predictions.csv'
+    suffix = '' if split == 'test' else f'_{split}'
+    save_path = f'{pred_dir}/{index_name}_{model_name}{suffix}_predictions.csv'
     res_df.to_csv(save_path, index=False)
 """))
 
@@ -227,7 +228,8 @@ for tier_name, config in TIERS_CONFIG.items():
         os.makedirs(weight_dir, exist_ok=True)
         torch.save(model.state_dict(), f'{weight_dir}/{index_name}_{m_name}.pt')
         
-        evaluate_and_save(model, test_loader, df_test, index_name, m_name, tier_name)
+        evaluate_and_save(model, val_loader, df_val, index_name, m_name, tier_name, split='validation')
+        evaluate_and_save(model, test_loader, df_test, index_name, m_name, tier_name, split='test')
 
 print('\\nALL TIERS DONE! Check /kaggle/working/results_hybrid/')
 """))

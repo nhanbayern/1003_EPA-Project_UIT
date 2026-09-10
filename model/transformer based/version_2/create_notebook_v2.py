@@ -116,7 +116,7 @@ def train_model(model, train_loader, val_loader):
 
 # Cell 5: Eval Function
 cells.append(new_code_cell("""\
-def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name):
+def evaluate_and_save(model, loader, df, index_name, model_name, tier_name, split='test'):
     model.eval()
     model.to(DEVICE)
     
@@ -127,7 +127,7 @@ def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name)
     first_horizon_pred = []
     
     with torch.no_grad():
-        for x, y_vol, y_ret, ts in test_loader:
+        for x, y_vol, y_ret, ts in loader:
             x = x.to(DEVICE)
             pred_vol = model(x)
             
@@ -161,7 +161,8 @@ def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name)
     
     pred_dir = f'/kaggle/working/results_v2/all_predictions/{tier_name}'
     os.makedirs(pred_dir, exist_ok=True)
-    save_path = f'{pred_dir}/{index_name}_{model_name}_predictions.csv'
+    suffix = '' if split == 'test' else f'_{split}'
+    save_path = f'{pred_dir}/{index_name}_{model_name}{suffix}_predictions.csv'
     res_df.to_csv(save_path, index=False)
     
     # Save Plot
@@ -292,7 +293,8 @@ for tier_name, config in TIERS_CONFIG.items():
             plot_loss_curve(t_losses, v_losses, f'{loss_dir}/{index_name}_{m_name}_loss.png', title=f'{m_name} Loss ({tier_name})')
             
             # Evaluate & Predict
-            res_df = evaluate_and_save(model, test_loader, df_test, index_name, m_name, tier_name)
+            val_df = evaluate_and_save(model, val_loader, df_val, index_name, m_name, tier_name, split='validation')
+            res_df = evaluate_and_save(model, test_loader, df_test, index_name, m_name, tier_name, split='test')
             
             m_metrics = calculate_metrics_for_df(res_df, m_name, index_name)
             index_metrics_dfs.append(m_metrics)

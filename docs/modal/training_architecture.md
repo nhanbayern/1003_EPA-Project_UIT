@@ -47,7 +47,7 @@ Modal Volume + ZIP trả về local
 | `run_selected()` | Chạy family trong container remote; publish checkpoint |
 | `experiments/moirai_var_aware/runner.py` | Runner Python riêng cho Moirai VaR-aware |
 | `experiments/moirai_var_aware/train.py` | Vòng train, early stopping và validation checkpoint |
-| `experiments/moirai_var_aware/data.py` | Tạo origin, input context, future-realized target và split |
+| `experiments/moirai_var_aware/data.py` | Tạo origin, input context, rolling-60 target và split |
 | `Results` | Modal Volume lưu weights/checkpoint lâu dài |
 
 Các family được hỗ trợ:
@@ -127,7 +127,7 @@ xi như trên Kaggle. `_prepare_notebook()` thực hiện:
 3. Đổi các path `/kaggle/...` sang `/root/...` hoặc `/root/modal_output/...`.
 4. Ghi đè lambda grid khi chạy MoiraiVaR.
 5. Chèn reporter cho dataset, tier, model và epoch.
-6. Kiểm tra không còn target rolling/RMS hoặc origin lệch.
+6. Kiểm tra không còn future-window proxy/RMS hoặc origin lệch.
 7. Ghi notebook đã chuẩn bị vào `/root/prepared_notebooks/`.
 
 Sau đó `run_selected()` compile và `exec` từng code cell. Vì các notebook cũ
@@ -146,7 +146,7 @@ Notebook của family chịu trách nhiệm:
 load data
   → tạo log returns
   → tạo input context
-  → tạo future-realized volatility target
+  → tạo rolling-60 volatility target tại endpoint `t+h`
   → split train / validation / test
   → train model
   → chọn checkpoint tốt nhất trên validation
@@ -159,12 +159,13 @@ Contract target dùng chung là:
 ```text
 origin: t
 input:  r[t-lookback+1 : t+1]
-target(h): std(r[t+1 : t+h+1], ddof=0)
+target(h): std(r[t+h-59 : t+h+1], ddof=0)
 VaR return: r[t+1]
 ```
 
-Historical rolling volatility hoặc GARCH conditional volatility chỉ được dùng
-làm feature khi family yêu cầu, không được dùng thay cho future target.
+Target là rolling `std(60)` tại endpoint `t+h`. Vì vậy `h=1` dùng 59
+returns đã quan sát và `r[t+1]`; target chỉ là supervised label, không được
+đưa vào input tại origin `t`.
 
 ### MoiraiVaR-aware
 

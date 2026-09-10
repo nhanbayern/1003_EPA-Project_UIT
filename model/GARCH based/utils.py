@@ -96,7 +96,7 @@ def get_split_indices(n_raw_samples, dataset_name):
     return train_cnt, train_cnt + val_cnt
 
 def save_predictions_csv(index_name, model_name, predictions_dict, origin_times,
-                         future_returns, out_dir, history_returns=None):
+                         future_returns, out_dir, history_returns=None, split="test"):
     """
     Save forecasts using the shared causal evaluation schema.
 
@@ -145,7 +145,8 @@ def save_predictions_csv(index_name, model_name, predictions_dict, origin_times,
             })
             
     df = pd.DataFrame(records)
-    out_path = Path(out_dir) / f"{index_name}_{model_name}_predictions.csv"
+    suffix = "" if split == "test" else f"_{split}"
+    out_path = Path(out_dir) / f"{index_name}_{model_name}{suffix}_predictions.csv"
     df.to_csv(out_path, index=False)
     print(f"Saved predictions to {out_path}")
 

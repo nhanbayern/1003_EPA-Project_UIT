@@ -338,6 +338,25 @@ def evaluate_model(model, test_loader, device='cuda'):
     return metrics_summary, preds, targets
 
 
+def save_prediction_csv(output_dir, index_name, model_type, subset, preds, targets, split):
+    rows = []
+    full_ds = subset.dataset
+    for k, idx in enumerate(subset.indices):
+        sample = full_ds.samples[idx]
+        for h_idx, h in enumerate([1, 3, 5, 10, 21]):
+            rows.append({
+                'time': sample['time'],
+                'log_return': sample['log_return'],
+                'horizon': h,
+                'true_volatility': targets[k, h_idx],
+                'predict_volatility': preds[k, h_idx],
+            })
+    suffix = '' if split == 'test' else f'_{split}'
+    path = os.path.join(output_dir, f'{index_name}_{model_type}{suffix}_predictions.csv')
+    pd.DataFrame(rows).to_csv(path, index=False)
+    print(f'Saved {split}: {path}')
+
+
 # %% CELL 10 (python) --- Full comparison pipeline
 import os
 
@@ -357,26 +376,16 @@ def run_comparison_pipeline(csv_path, index_name, device='cuda', weights_dir=Non
         extractor = VolatilityFeatureExtractor(model_type=m_type, size='small', device=device, weights_dir=weights_dir)
         model = VolatilityRegressionModel(extractor=extractor)
         model = train_model(model, train_loader, val_loader, epochs=30, device=device)
+        _, val_preds, val_targets = evaluate_model(model, val_loader, device=device)
         metrics, preds, targets = evaluate_model(model, test_loader, device=device)
         results[m_type] = {'metrics': metrics, 'preds': preds, 'targets': targets}
 
         # Lưu file CSV kết quả cho từng mô hình và từng chỉ số
-        csv_rows = []
-        full_ds = test_ds.dataset
-        for k, idx in enumerate(test_ds.indices):
-            sample = full_ds.samples[idx]
-            for h_idx, h in enumerate([1, 3, 5, 10, 21]):
-                csv_rows.append({
-                    'time': sample['time'],
-                    'log_return': sample['log_return'],
-                    'horizon': h,
-                    'true_volatility': targets[k, h_idx],
-                    'predict_volatility': preds[k, h_idx]
-                })
-        df_out = pd.DataFrame(csv_rows)
-        csv_filename = os.path.join(output_dir, f"{index_name}_{m_type}_predictions.csv")
-        df_out.to_csv(csv_filename, index=False)
-        print(f"Saved: {csv_filename}")
+        save_prediction_csv(output_dir, index_name, m_type, val_ds, val_preds, val_targets, 'validation')
+        save_prediction_csv(output_dir, index_name, m_type, test_ds, preds, targets, 'test')
+        trained_weights_dir = os.path.join(os.path.dirname(output_dir), 'weights')
+        os.makedirs(trained_weights_dir, exist_ok=True)
+        torch.save(model.state_dict(), os.path.join(trained_weights_dir, f'{index_name}_{m_type}.pt'))
 
     return results
 

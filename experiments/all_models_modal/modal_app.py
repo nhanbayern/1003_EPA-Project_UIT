@@ -63,9 +63,12 @@ NOTEBOOKS = {
     "hybrid": "model/modify_autoformer/Hybrid GARCH-Autoformer/kaggle_notebook_hybrid.ipynb",
     "wavelet": "model/modify_autoformer/Wavelet Transform/kaggle_notebook_wavelet.ipynb",
 }
+# AAAI24_GARCH_NN_Reproduction is intentionally excluded: it reproduces the
+# former legacy target protocol and is not part of the paper benchmark.
+LEGACY_FAMILIES = {"aaai24"}
 STANDARD_COLUMNS = [
     "dataset", "branch", "tier", "model", "time", "horizon",
-    "log_return", "true_volatility", "predict_volatility",
+    "log_return", "true_volatility", "predict_volatility", "split",
 ]
 CANONICAL_HORIZONS = {1, 3, 5, 10, 21}
 
@@ -127,8 +130,23 @@ def _normalize_predictions(output_dir: Path) -> None:
         next_return = log_returns[next_position] if next_position < len(log_returns) else np.nan
         return calendar[origin_position], next_return
 
+    def split_for(path: Path, frame: pd.DataFrame) -> str:
+        if "split" in frame.columns:
+            values = frame["split"].dropna().astype(str).unique()
+            if len(values) == 1 and values[0] in {"validation", "test"}:
+                return values[0]
+        return "validation" if "_validation_predictions" in path.name else "test"
+
+    def output_name(prefix: str, path: Path, split: str) -> str:
+        suffix = "" if split == "test" else "_validation"
+        return f"{prefix}{suffix}_predictions.csv"
+
+    def base_stem(path: Path) -> str:
+        return path.stem.removesuffix("_validation_predictions").removesuffix("_predictions")
+
     for csv_file in (output_dir / "garch" / "predictions").glob("*_predictions.csv"):
         frame = pd.read_csv(csv_file)
+        split = split_for(csv_file, frame)
         dataset = str(frame["dataset"].iloc[0])
         model = str(frame["model"].iloc[0])
         is_hybrid = model == "GARCH-LSTM-Hybrid"
@@ -148,14 +166,16 @@ def _normalize_predictions(output_dir: Path) -> None:
             ),
             "true_volatility": frame["actual_vol"],
             "predict_volatility": frame["pred_vol"],
+            "split": split,
         })
-        normalized.to_csv(destination / f"{dataset}_{model}_predictions.csv", index=False)
+        normalized.to_csv(destination / output_name(f"{dataset}_{model}", csv_file, split), index=False)
 
     transformer_root = output_dir / "transformer" / "all_predictions"
     for csv_file in transformer_root.rglob("*_predictions.csv"):
         frame = pd.read_csv(csv_file)
+        split = split_for(csv_file, frame)
         tier = csv_file.parent.name
-        stem = csv_file.stem.removesuffix("_predictions")
+        stem = base_stem(csv_file)
         dataset, model = stem.rsplit("_", 1)
         normalized = pd.DataFrame({
             "dataset": dataset,
@@ -169,14 +189,16 @@ def _normalize_predictions(output_dir: Path) -> None:
             "log_return": frame["log_return"],
             "true_volatility": frame["true_volatility"],
             "predict_volatility": frame["predict_volatility"],
+            "split": split,
         })
-        normalized.to_csv(destination / f"{tier}_{dataset}_{model}_predictions.csv", index=False)
+        normalized.to_csv(destination / output_name(f"{tier}_{dataset}_{model}", csv_file, split), index=False)
 
     for family_dir, branch in (("hybrid", "modified_autoformer"), ("wavelet", "modified_autoformer")):
         for csv_file in (output_dir / family_dir / "all_predictions").rglob("*_predictions.csv"):
             frame = pd.read_csv(csv_file)
+            split = split_for(csv_file, frame)
             tier = csv_file.parent.name
-            dataset, model = csv_file.stem.removesuffix("_predictions").rsplit("_", 1)
+            dataset, model = base_stem(csv_file).rsplit("_", 1)
             normalized = pd.DataFrame({
                 "dataset": dataset,
                 "branch": branch,
@@ -187,12 +209,14 @@ def _normalize_predictions(output_dir: Path) -> None:
                 "log_return": frame["log_return"],
                 "true_volatility": frame["true_volatility"],
                 "predict_volatility": frame["predict_volatility"],
+                "split": split,
             })
-            normalized.to_csv(destination / f"{family_dir}_{tier}_{dataset}_{model}_predictions.csv", index=False)
+            normalized.to_csv(destination / output_name(f"{family_dir}_{tier}_{dataset}_{model}", csv_file, split), index=False)
 
     for csv_file in (output_dir / "moirai" / "predictions").glob("*_predictions.csv"):
         frame = pd.read_csv(csv_file)
-        dataset, model = csv_file.stem.removesuffix("_predictions").rsplit("_", 1)
+        split = split_for(csv_file, frame)
+        dataset, model = base_stem(csv_file).rsplit("_", 1)
         normalized = pd.DataFrame({
             "dataset": dataset,
             "branch": "Moirai",
@@ -203,16 +227,20 @@ def _normalize_predictions(output_dir: Path) -> None:
             "log_return": frame["log_return"],
             "true_volatility": frame["true_volatility"],
             "predict_volatility": frame["predict_volatility"],
+            "split": split,
         })
-        normalized.to_csv(destination / f"Moirai_{dataset}_{model}_predictions.csv", index=False)
+        normalized.to_csv(destination / output_name(f"Moirai_{dataset}_{model}", csv_file, split), index=False)
 
     # MoiraiVaR emits native rows with its branch/tier already populated.
     # _prepare_notebook writes those rows beside its ZIP archive so they are
     # treated identically to every other family during normalization.
     for csv_file in (output_dir / "moiraivar" / "predictions").glob("*_predictions.csv"):
         frame = pd.read_csv(csv_file)
+        split = split_for(csv_file, frame)
+        if "split" not in frame.columns:
+            frame["split"] = split
         normalized = frame.reindex(columns=STANDARD_COLUMNS)
-        normalized.to_csv(destination / f"MoiraiVaR_{csv_file.name}", index=False)
+        normalized.to_csv(destination / output_name(f"MoiraiVaR_{base_stem(csv_file)}", csv_file, split), index=False)
 
     # Fail closed before an artifact can be promoted.  This validates the
     # contract at the boundary shared by every model family, instead of
@@ -223,6 +251,10 @@ def _normalize_predictions(output_dir: Path) -> None:
         missing = required - set(frame.columns)
         if missing:
             raise ValueError(f"{normalized_file.name}: missing canonical columns {sorted(missing)}")
+        if set(frame["split"].dropna().astype(str).unique()) - {"validation", "test"}:
+            raise ValueError(f"{normalized_file.name}: invalid split values")
+        if not set(frame["horizon"].dropna().astype(int).unique()).issubset(CANONICAL_HORIZONS):
+            raise ValueError(f"{normalized_file.name}: invalid horizon values")
         if frame.empty:
             raise ValueError(f"{normalized_file.name}: empty prediction artifact")
         horizons = set(pd.to_numeric(frame["horizon"], errors="coerce").dropna().astype(int))
@@ -299,9 +331,11 @@ def _prepare_notebook(source: Path, destination: Path, output_dir: Path, smoke_t
                             "hybrid_origin_times, hybrid_future_returns, pred_dir, history_returns=test_r.iloc[:DEFAULT_SEQ_LEN])")
         if smoke_test:
             text = text.replace("for index_name in SPLIT_INFO.keys():", "for index_name in list(SPLIT_INFO.keys())[:1]:")
+            text = text.replace("DATASETS_TO_TRAIN = list(SPLIT_INFO.keys())", "DATASETS_TO_TRAIN = list(SPLIT_INFO.keys())[:1]")
             # Some statistical notebooks enumerate raw dataset files instead
             # of SPLIT_INFO; keep smoke runs to one market in that path too.
             text = text.replace("for csv_file in csv_files:", "for csv_file in csv_files[:1]:")
+            text = text.replace("for fpath in csv_files:", "for fpath in csv_files[:1]:")
             text = text.replace("EPOCHS = 30", "EPOCHS = 1")
             text = text.replace("EPOCHS = 50", "EPOCHS = 1")
             text = text.replace("EPOCHS=50", "EPOCHS=1")

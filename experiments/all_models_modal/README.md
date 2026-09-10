@@ -12,6 +12,11 @@ py -3.11 -m modal run experiments/all_models_modal/modal_app.py --families garch
 
 Artifacts are extracted locally to `output/<YYYYMMDD_HHMMSS>/`. The run directory contains predictions, figures/metrics where produced, and model artifacts:
 
+Each active family exports both `*_validation_predictions.csv` and
+`*_predictions.csv`; normalized artifacts include `split` and are checked for
+the canonical horizons `{1, 3, 5, 10, 21}` before publication. AAAI24 is
+legacy-only and is intentionally absent from the launcher family list.
+
 - `garch/model_params/`: fitted GARCH/GJR-GARCH/FI-GARCH parameters and GARCH-LSTM weights.
 - `transformer/models_weights/`: Transformer, Autoformer, Informer, and Reformer weights.
 - `moiraivar/weights/`: MoiraiVaR model state dictionaries.

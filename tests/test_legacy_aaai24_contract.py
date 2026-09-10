@@ -1,13 +1,12 @@
-"""Fast, data-free checks for the shared forecast-target contract."""
+"""Regression checks for the intentionally retained AAAI24 legacy package."""
 
-import importlib.util
 import importlib
+import importlib.util
 import sys
 import types
 from pathlib import Path
 
 import numpy as np
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -20,13 +19,12 @@ def _load_module(path: Path, name: str):
     return module
 
 
-def test_aaai_windows_use_future_std_and_not_rolling_feature():
+def test_aaai_windows_remain_legacy_future_std():
     module = _load_module(
         ROOT / "AAAI24_GARCH_NN_Reproduction" / "core" / "data_processor.py",
         "aaai24_data_processor",
     )
     returns = np.arange(1.0, 30.0)
-    # Deliberately make the feature different from the target.
     historical_feature = np.full(returns.shape, 999.0)
     windows = module.create_sliding_windows(
         returns, historical_feature, seq_len=3, horizon=3, multi_horizon=False
@@ -34,12 +32,12 @@ def test_aaai_windows_use_future_std_and_not_rolling_feature():
 
     np.testing.assert_allclose(windows["encoder_returns"][0], [1.0, 2.0, 3.0])
     np.testing.assert_allclose(windows["target_returns"][0], 6.0)
-    np.testing.assert_allclose(windows["target_variance"][0], np.std([4.0, 5.0, 6.0], ddof=0))
+    np.testing.assert_allclose(
+        windows["target_variance"][0], np.std([4.0, 5.0, 6.0], ddof=0)
+    )
 
 
 def test_legacy_realized_vol_is_origin_aligned_future_std():
-    # Avoid importing the legacy package __init__, which eagerly imports the
-    # optional torch-based models.
     package = types.ModuleType("ultility")
     package.__path__ = [str(ROOT / "ultility")]
     sys.modules.setdefault("ultility", package)

@@ -1,5 +1,12 @@
 # AAAI24_GARCH_NN_Reproduction
 
+## Legacy / excluded from current benchmark
+
+This package is retained only for historical AAAI24 reproduction. It uses the
+former legacy target protocol and is not executed by the Modal six-family
+benchmark or used for the current paper results. The active target contract is
+defined in `docs/target_contract.md`.
+
 This folder is isolated from the legacy codebase.
 No existing source files were modified.
 

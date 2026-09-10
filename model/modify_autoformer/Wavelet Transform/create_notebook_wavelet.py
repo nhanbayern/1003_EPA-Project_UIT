@@ -54,8 +54,7 @@ SPLITS = {
 # Cell 4: Train Function
 cells.append(new_code_cell("""\
 def train_model(model, train_loader, val_loader):
-    # This point-forecast baseline targets future-realized volatility, not a
-    # historical rolling feature.
+# The model target is the shared rolling-60 volatility at endpoint t+h.
     criterion = torch.nn.MSELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     best_val_loss = float('inf')
@@ -99,13 +98,13 @@ def train_model(model, train_loader, val_loader):
 
 # Cell 5: Evaluate & Save Predictions
 cells.append(new_code_cell("""\
-def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name):
+def evaluate_and_save(model, loader, df, index_name, model_name, tier_name, split='test'):
     model.eval()
     model.to(DEVICE)
     results = []
 
     with torch.no_grad():
-        for x, y_vol, y_ret, ts in test_loader:
+        for x, y_vol, y_ret, ts in loader:
             x = x.to(DEVICE)
             pred_vol = model(x).cpu().numpy()
             y_vol = y_vol.numpy()
@@ -129,7 +128,8 @@ def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name)
     res_df = pd.DataFrame(results)
     pred_dir = f'/kaggle/working/results_wavelet/all_predictions/{tier_name}'
     os.makedirs(pred_dir, exist_ok=True)
-    res_df.to_csv(f'{pred_dir}/{index_name}_{model_name}_predictions.csv', index=False)
+    suffix = '' if split == 'test' else f'_{split}'
+    res_df.to_csv(f'{pred_dir}/{index_name}_{model_name}{suffix}_predictions.csv', index=False)
 """))
 
 # Cell 6: Main Loop
@@ -194,7 +194,8 @@ for tier_name, config in TIERS_CONFIG.items():
         os.makedirs(weight_dir, exist_ok=True)
         torch.save(model.state_dict(), f'{weight_dir}/{index_name}_{m_name}.pt')
 
-        evaluate_and_save(model, test_loader, df_test, index_name, m_name, tier_name)
+        evaluate_and_save(model, val_loader, df_val, index_name, m_name, tier_name, split='validation')
+        evaluate_and_save(model, test_loader, df_test, index_name, m_name, tier_name, split='test')
 
 print('\\nALL TIERS DONE! Check /kaggle/working/results_wavelet/')
 """))
