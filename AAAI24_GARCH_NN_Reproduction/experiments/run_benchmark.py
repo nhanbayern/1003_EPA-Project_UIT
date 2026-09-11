@@ -161,15 +161,13 @@ def _build_target_matrix_point_in_time(
     rolling_window=ROLLING_VOL_WINDOW,
     history_returns=None,
 ):
-    """
-    Build point-in-time volatility targets for horizons 1..max_horizon.
+    """Build causal future-realized volatility targets.
 
-    Target definition for anchor i and horizon h:
-        target(i, h) = rolling_std_rolling_window(test_returns.shift(1))[i + h]
-
-    This matches the realized-vol formula over past returns only:
-        sigma_t = sqrt((1 / w) * sum_{k=1..w} (r_{t-k} - r_bar)^2)
-    implemented with population std (ddof=0).
+    For a forecast origin ``t`` and horizon ``h`` the target is
+    ``std(r[t+1:t+h+1], ddof=0)``.  ``history_returns`` and
+    ``rolling_window`` remain accepted for API compatibility but are not
+    consulted: a historical rolling statistic is a feature, not the
+    evaluation target.
     """
     test_returns = np.asarray(test_returns, dtype=float)
     if max_horizon < 1:
@@ -180,28 +178,14 @@ def _build_target_matrix_point_in_time(
     if n_anchors <= 0:
         return np.empty((0, max_horizon), dtype=float), 0
 
-    if history_returns is not None and len(history_returns) > 0:
-        history_returns = np.asarray(history_returns, dtype=float)
-        full_returns = np.concatenate([history_returns, test_returns])
-        rolling_full = (
-            pd.Series(full_returns)
-            .shift(1)
-            .rolling(window=int(rolling_window))
-            .std(ddof=0)
-            .to_numpy(dtype=float)
-        )
-        rolling_vol = rolling_full[-n_test:]
-    else:
-        rolling_vol = (
-            pd.Series(test_returns)
-            .shift(1)
-            .rolling(window=int(rolling_window))
-            .std(ddof=0)
-            .to_numpy(dtype=float)
-        )
-
     target_matrix = np.asarray(
-        [rolling_vol[i + 1 : i + max_horizon + 1] for i in range(n_anchors)],
+        [
+            [
+                np.std(test_returns[i + 1 : i + h + 1], ddof=0)
+                for h in range(1, max_horizon + 1)
+            ]
+            for i in range(n_anchors)
+        ],
         dtype=float,
     )
 
@@ -616,8 +600,10 @@ def run_benchmark(
                     true_vol_h = target_matrix[:, h_idx]
 
                     n_eval = n_anchors
-                    target_times = test_time_index[horizon : horizon + n_eval]
-                    returns_eval_h = test_r_np[horizon : horizon + n_eval]
+                    # Every horizon is forecast from the same origin.  VaR
+                    # uses the first unseen return r[t+1], not r[t+h].
+                    target_times = test_time_index[:n_eval]
+                    returns_eval_h = test_r_np[1 : n_eval + 1]
 
                     metric_values = compute_metrics(
                         true_vol_h,

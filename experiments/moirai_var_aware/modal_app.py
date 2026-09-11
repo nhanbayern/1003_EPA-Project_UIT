@@ -99,6 +99,7 @@ def main(
     models: str = "moirai,moirai2,moirai_moe",
     datasets: str = "",
     output_dir: str = "output/modal_moirai_var_loss",
+    lambda_sweep: str = "",
 ):
     if tuning_mode not in {"head", "full"}:
         raise ValueError("tuning_mode must be 'head' or 'full'")
@@ -109,15 +110,10 @@ def main(
     mode_suffix = "" if tuning_mode == "head" else f"_{tuning_mode}"
     zip_name = f"moirai_var{mode_suffix}_lambda_{lambda_var:g}_predictions.zip"
 
-    zip_bytes = train_remote.remote(
-        lambda_var,
-        epochs,
-        batch_size,
-        tuning_mode,
-        backbone_lr,
-        selected_models,
-        selected_datasets,
-    )
-    out_file = output_path / zip_name
-    out_file.write_bytes(zip_bytes)
-    print(f"saved {out_file}")
+    sweep = [float(value.strip()) for value in lambda_sweep.split(",") if value.strip()] if lambda_sweep else [lambda_var]
+    for current_lambda in sweep:
+        zip_bytes = train_remote.remote(current_lambda, epochs, batch_size, tuning_mode, backbone_lr, selected_models, selected_datasets)
+        current_name = f"moirai_var{mode_suffix}_lambda_{current_lambda:g}_predictions.zip"
+        out_file = output_path / current_name
+        out_file.write_bytes(zip_bytes)
+        print(f"saved {out_file}")

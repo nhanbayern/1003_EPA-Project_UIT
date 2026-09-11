@@ -1,5 +1,6 @@
 import nbformat
 from nbformat.v4 import new_notebook, new_code_cell
+from pathlib import Path
 
 nb = new_notebook()
 
@@ -139,30 +140,42 @@ else:
         # Get dataloaders for GARCH-LSTM training
         train_loader, val_loader, test_r, test_v, test_time = get_dataloaders(csv_file, batch_size=BATCH_SIZE)
         
-        # Stat model data: history = all returns up to val_end, test = from val_end onwards
+        # Validation is forecast from train only; test is forecast after fitting
+        # on train+validation. This keeps the validation gate leakage-free.
         # Filter out NaN values for stat model fitting
-        stat_train_r = returns.iloc[:val_end].dropna()
+        stat_train_r = returns.iloc[:train_end].dropna()
+        stat_val_r = returns.iloc[train_end:val_end].dropna()
         stat_test_r = returns.iloc[val_end:].dropna()
         stat_test_time = returns.index[val_end:]
         stat_test_v = volatility.iloc[val_end:]
         
-        print(f"  Train+Val returns: {len(stat_train_r)}, Test returns: {len(stat_test_r)}")
+        print(f"  Train returns: {len(stat_train_r)}, Validation returns: {len(stat_val_r)}, Test returns: {len(stat_test_r)}")
         print(f"  Test period: {stat_test_time[0]} to {stat_test_time[-1]}")
         
         # 2. Train and Evaluate Statistical Models
         for stat_model_name in MODEL_SPECS.keys():
             print(f"--- Running {stat_model_name} ---")
+            val_predictions, _ = evaluate_stat_model(
+                stat_train_r, stat_val_r,
+                model_name=stat_model_name,
+                dist="t",
+                horizons=HORIZONS
+            )
+            val_origin_times = returns.index[train_end - 1: train_end - 1 + len(stat_val_r)]
+            save_predictions_csv(index_name, stat_model_name, val_predictions,
+                                 val_origin_times, stat_val_r, pred_dir,
+                                 history_returns=stat_train_r, split="validation")
             predictions, params = evaluate_stat_model(
-                stat_train_r, stat_test_r, 
+                returns.iloc[:val_end].dropna(), stat_test_r,
                 model_name=stat_model_name, 
                 dist="t", 
                 horizons=HORIZONS
             )
             
-            save_predictions_csv(
-                index_name, stat_model_name, predictions,
-                stat_test_time, stat_test_r, volatility, val_end, pred_dir
-            )
+            origin_times = returns.index[val_end - 1: val_end - 1 + len(stat_test_r)]
+            save_predictions_csv(index_name, stat_model_name, predictions,
+                                 origin_times, stat_test_r, pred_dir,
+                                 history_returns=returns.iloc[:val_end].dropna(), split="test")
             plot_predictions(index_name, stat_model_name, predictions, stat_test_time, stat_test_v, viz_dir, horizon=21)
             
             param_df = pd.DataFrame(params)
@@ -181,10 +194,22 @@ else:
             seq_len=DEFAULT_SEQ_LEN, horizons=HORIZONS, device=DEVICE
         )
         
-        save_predictions_csv(
-            index_name, "GARCH-LSTM-Hybrid", lstm_predictions,
-            test_time, test_r.iloc[DEFAULT_SEQ_LEN:], volatility, val_end, pred_dir
+        hybrid_future_returns = test_r.iloc[DEFAULT_SEQ_LEN:]
+        hybrid_origin_times = returns.index[val_end - 1: val_end - 1 + len(hybrid_future_returns)]
+        val_r = returns.iloc[max(0, train_end - DEFAULT_SEQ_LEN):val_end]
+        val_v = volatility.iloc[max(0, train_end - DEFAULT_SEQ_LEN):val_end]
+        val_predictions = evaluate_garch_lstm(
+            model, val_r, val_v,
+            seq_len=DEFAULT_SEQ_LEN, horizons=HORIZONS, device=DEVICE
         )
+        val_future_returns = val_r.iloc[DEFAULT_SEQ_LEN:]
+        val_origin_times = returns.index[train_end - 1: train_end - 1 + len(val_future_returns)]
+        save_predictions_csv(index_name, "GARCH-LSTM-Hybrid", val_predictions,
+                             val_origin_times, val_future_returns, pred_dir,
+                             history_returns=val_r.iloc[:DEFAULT_SEQ_LEN], split="validation")
+        save_predictions_csv(index_name, "GARCH-LSTM-Hybrid", lstm_predictions,
+                             hybrid_origin_times, hybrid_future_returns, pred_dir,
+                             history_returns=test_r.iloc[:DEFAULT_SEQ_LEN], split="test")
         plot_predictions(index_name, "GARCH-LSTM-Hybrid", lstm_predictions, test_time, test_v.iloc[DEFAULT_SEQ_LEN:], viz_dir, horizon=21)
 
 print('\\nALL TASKS DONE! Check /kaggle/working/results/')
@@ -193,6 +218,6 @@ print('\\nALL TASKS DONE! Check /kaggle/working/results/')
 nb.cells = cells
 
 # Use absolute path assuming it will be run in Cwd
-with open('D:/UIT/1003_EPA_PROJECT/1.0.0/1003_EPA-Project_UIT/model/GARCH based/GARCH_Kaggle_Pipeline.ipynb', 'w', encoding='utf-8') as f:
+with open(Path(__file__).with_name('GARCH_Kaggle_Pipeline.ipynb'), 'w', encoding='utf-8') as f:
     nbformat.write(nb, f)
 print('Notebook regenerated successfully.')

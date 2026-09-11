@@ -18,18 +18,12 @@ class VolatilityDataset(Dataset):
         self.returns = df['log_return'].fillna(0).values
         self.time = df['time'].values if 'time' in df.columns else np.arange(len(self.returns))
         
-        # Precompute rolling standard deviation using pandas to avoid O(N) in __getitem__
-        # pandas rolling window is inclusive of the current index, so rolling(60).std() at index t
-        # gives the std of [t-59: t+1], which exactly matches the lookback logic.
-        returns_series = pd.Series(self.returns)
-        self.rolling_std = returns_series.rolling(window=lookback).std().values
-        
         self.lookback = lookback
         self.horizon = horizon
         
         self.valid_indices = []
-        # t is the end of the lookback window
-        for t in range(lookback, len(self.returns) - horizon + 1):
+        # t is the final observed return in the 60-day context.
+        for t in range(lookback - 1, len(self.returns) - horizon):
             self.valid_indices.append(t)
             
     def __len__(self):
@@ -38,13 +32,15 @@ class VolatilityDataset(Dataset):
     def __getitem__(self, idx):
         t = self.valid_indices[idx]
         
-        # Input features: [t-lookback : t] (exclusive of t, so [t-60 : t])
-        x = self.returns[t - self.lookback : t]
+        # Input features: r[t-59:t+1].
+        x = self.returns[t - self.lookback + 1 : t + 1]
         
-        # Target volatility and returns for horizon 1 to 21
-        # Precalculated rolling_std[t] corresponds to horizon 1, rolling_std[t+20] to horizon 21.
-        y_vol = self.rolling_std[t : t + self.horizon]
-        y_ret = self.returns[t : t + self.horizon]
+        # Target is rolling volatility at the future endpoint t+h.
+        y_vol = np.array([
+            np.std(self.returns[t + h - self.lookback + 1 : t + h + 1], ddof=0)
+            for h in range(1, self.horizon + 1)
+        ], dtype=np.float32)
+        y_ret = self.returns[t + 1 : t + self.horizon + 1]
         
         x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(-1) # [60, 1]
         y_vol_tensor = torch.tensor(y_vol, dtype=torch.float32) # [21]

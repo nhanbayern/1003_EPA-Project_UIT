@@ -8,6 +8,7 @@ class VolatilityDataset(Dataset):
         """
         df: DataFrame containing at least 'close' or 'log_return'
         """
+        df = df.copy()
         if 'log_return' not in df.columns:
             if 'close' in df.columns:
                 df['log_return'] = np.log(df['close'] / df['close'].shift(1)) * 100.0
@@ -23,7 +24,7 @@ class VolatilityDataset(Dataset):
         
         self.valid_indices = []
         # t is the end of the lookback window
-        for t in range(lookback, len(self.returns) - horizon + 1):
+        for t in range(lookback - 1, len(self.returns) - horizon):
             self.valid_indices.append(t)
             
     def __len__(self):
@@ -32,22 +33,19 @@ class VolatilityDataset(Dataset):
     def __getitem__(self, idx):
         t = self.valid_indices[idx]
         
-        # Input features: [t-lookback : t-1] (inclusive of t-1, exclusive of t)
-        x = self.returns[t - self.lookback : t]
+        # Input features: r[t-lookback+1:t+1], ending at the forecast origin t.
+        x = self.returns[t - self.lookback + 1 : t + 1]
         
         # Targets for horizon 1 to 21
         y_vol = np.zeros(self.horizon, dtype=np.float32)
         y_ret = np.zeros(self.horizon, dtype=np.float32)
         
         for h in range(1, self.horizon + 1):
-            # Target volatility for step h is std over [t+h-60 : t+h-1]
-            start_idx = t + h - self.lookback
-            end_idx = t + h
-            window_returns = self.returns[start_idx : end_idx]
+            # Target is rolling volatility at the future endpoint t+h.
+            window_returns = self.returns[t + h - self.lookback + 1 : t + h + 1]
             
-            # Using ddof=1 for sample standard deviation as per standard practice
-            y_vol[h-1] = np.std(window_returns, ddof=1)
-            y_ret[h-1] = self.returns[t + h - 1]
+            y_vol[h-1] = np.std(window_returns, ddof=0)
+            y_ret[h-1] = self.returns[t + h]
             
         x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(-1) # [60, 1]
         y_vol_tensor = torch.tensor(y_vol, dtype=torch.float32) # [21]

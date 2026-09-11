@@ -66,39 +66,47 @@ class series_decomp(nn.Module):
         return res, moving_mean
 
 class AutoCorrelation(nn.Module):
-    def __init__(self, d_model, c=1):
+    def __init__(self, d_model, n_heads=1, c=1):
         super().__init__()
+        if d_model % n_heads != 0:
+            raise ValueError("d_model must be divisible by n_heads")
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
         self.c = c
         self.qkv = nn.Linear(d_model, 3 * d_model)
         self.out = nn.Linear(d_model, d_model)
 
     def forward(self, x):
         B, L, E = x.shape
-        qkv = self.qkv(x).reshape(B, L, 3, E).permute(2, 0, 1, 3)
+        qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim).permute(2, 0, 1, 3, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
         
         q_fft = torch.fft.rfft(q, dim=1)
         k_fft = torch.fft.rfft(k, dim=1)
         res = q_fft * torch.conj(k_fft)
-        corr = torch.fft.irfft(res, dim=1)
+        # One delay score per attention head; aggregate its feature channels.
+        corr = torch.fft.irfft(res, dim=1).mean(dim=-1)
         
         weights, delays = torch.topk(corr, self.c, dim=1)
         weights = torch.softmax(weights, dim=1)
         
         out = torch.zeros_like(v)
+        positions = torch.arange(L, device=x.device).view(1, L, 1)
         for i in range(self.c):
-            delay = delays[:, i, 0]
-            rolled_v = torch.roll(v, shifts=-1, dims=1) 
-            out += rolled_v * weights[:, i:i+1, :]
+            delay = delays[:, i, :]
+            gather_index = (positions - delay.unsqueeze(1)) % L
+            gather_index = gather_index.unsqueeze(-1).expand(-1, -1, -1, self.head_dim)
+            rolled_v = torch.gather(v, 1, gather_index)
+            out += rolled_v * weights[:, i, :].unsqueeze(1).unsqueeze(-1)
             
-        return self.out(out)
+        return self.out(out.reshape(B, L, E))
 
 class AutoformerEncoderLayer(nn.Module):
-    def __init__(self, d_model, d_ff, dropout=0.3):
+    def __init__(self, d_model, d_ff, n_heads=1, dropout=0.3):
         super().__init__()
         self.decomp1 = series_decomp(kernel_size=5)
         self.decomp2 = series_decomp(kernel_size=5)
-        self.autocorr = AutoCorrelation(d_model, c=1)
+        self.autocorr = AutoCorrelation(d_model, n_heads=n_heads, c=1)
         self.ff = nn.Sequential(nn.Linear(d_model, d_ff), nn.GELU(), nn.Linear(d_ff, d_model))
         self.dropout = nn.Dropout(dropout)
         
@@ -119,7 +127,7 @@ class AutoformerResidual(nn.Module):
         self.embedding = nn.Linear(1, d_model)
         self.pos_encoder = PositionalEncoding(d_model)
         
-        self.layers = nn.ModuleList([AutoformerEncoderLayer(d_model, d_ff, dropout) for _ in range(e_layers)])
+        self.layers = nn.ModuleList([AutoformerEncoderLayer(d_model, d_ff, n_heads, dropout) for _ in range(e_layers)])
         self.head = ResidualHead(seq_len * d_model, out_features=pred_len)
 
     def forward(self, x):

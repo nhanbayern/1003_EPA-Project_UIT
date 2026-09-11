@@ -5,8 +5,23 @@ from scipy import stats
 from pathlib import Path
 from .metrics import compute_mse_qlike, kupiec_test, rolling_std_vol
 
-def realized_vol(returns, window):
-    return np.sqrt(pd.Series(returns).rolling(window + 1).apply(lambda x: np.mean(x**2), raw=True).values)
+def realized_vol(returns, horizon):
+    """Return origin-aligned future realized population std.
+
+    For origin ``t`` this is ``std(r[t+1:t+horizon+1], ddof=0)``.  The old
+    implementation used an RMS rolling window, which overlapped the encoder
+    context and was not a forecast target.
+    """
+    arr = np.asarray(returns, dtype=float)
+    horizon = int(horizon)
+    if horizon < 1:
+        raise ValueError("horizon must be >= 1")
+    out = np.full(arr.shape[0], np.nan, dtype=float)
+    for t in range(arr.shape[0] - horizon):
+        window = arr[t + 1 : t + horizon + 1]
+        if np.isfinite(window).all():
+            out[t] = np.std(window, ddof=0)
+    return out
 
 def _parse_prediction_dates(preds_df):
     pred = preds_df.copy()
@@ -24,12 +39,12 @@ def _iter_aligned_frames(preds_df, datasets, split_df, seq_len=60):
         series = datasets[ds]
         test_start = tr + va
         test_data = series.iloc[test_start:test_start + te].values
-        dates = pd.to_datetime(series.index[test_start + seq_len:test_start + te])
+        dates = pd.to_datetime(series.index[test_start:test_start + te - 1])
 
-        realized = realized_vol(test_data, seq_len)[seq_len:]
-        har_vol = rolling_std_vol(test_data[:-1], seq_len)[seq_len - 1:] if len(test_data) > seq_len else np.array([])
+        realized = realized_vol(test_data, horizon=1)[:len(dates)]
+        har_vol = rolling_std_vol(test_data, seq_len)[:len(dates)]
         realized_df = pd.DataFrame({'Date': dates, 'realized_vol': realized[:len(dates)], 'har_vol': har_vol[:len(dates)]})
-        return_df = pd.DataFrame({'Date': pd.to_datetime(series.index[test_start:test_start + te]), 'return': test_data})
+        return_df = pd.DataFrame({'Date': dates, 'return': test_data[1:1 + len(dates)]})
 
         for model in pred['Model'].dropna().unique():
             pred_df = pred[(pred['Dataset'] == ds) & (pred['Model'] == model)][['Date', 'predicted_vol']].dropna().sort_values('Date')
@@ -50,8 +65,8 @@ def build_predictions_df(datasets, split_df, predictions_dict, seq_len=60):
         tr, va, te = map(int, split_df.loc[ds, ['Train', 'Val', 'Test']])
         test_start = tr + va
         test_data = series.iloc[test_start:test_start + te].values if hasattr(series, 'iloc') else series[test_start:test_start + te]
-        test_dates = series.index[test_start + seq_len:test_start + te] if hasattr(series, 'index') else np.arange(test_start + seq_len, test_start + te)
-        y_real = realized_vol(test_data, seq_len)[seq_len:]
+        test_dates = series.index[test_start:test_start + te - 1] if hasattr(series, 'index') else np.arange(test_start, test_start + te - 1)
+        y_real = realized_vol(test_data, horizon=1)[:len(test_dates)]
 
         for model, preds in predictions_dict.items():
             if ds not in preds:
@@ -62,7 +77,7 @@ def build_predictions_df(datasets, split_df, predictions_dict, seq_len=60):
                     'Dataset': ds,
                     'Model': model,
                     'Date': d,
-                    'return': test_data[seq_len + i],
+                    'return': test_data[1 + i],
                     'predicted_vol': y_pred[i],
                     'vol_realized': y_real[i],
                 })

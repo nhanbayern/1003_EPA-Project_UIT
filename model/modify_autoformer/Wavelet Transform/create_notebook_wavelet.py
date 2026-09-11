@@ -1,5 +1,6 @@
 import nbformat
 from nbformat.v4 import new_notebook, new_code_cell
+from pathlib import Path
 
 nb = new_notebook()
 cells = []
@@ -20,7 +21,6 @@ import torch
 from torch.utils.data import DataLoader
 from dataset import VolatilityDataset
 from models import WaveletAutoformer
-from utils import calculate_fixed_nu, StudentTNLLLoss
 from config import TIERS_CONFIG
 import glob
 from pathlib import Path
@@ -53,8 +53,9 @@ SPLITS = {
 
 # Cell 4: Train Function
 cells.append(new_code_cell("""\
-def train_model(model, train_loader, val_loader, nu):
-    criterion = StudentTNLLLoss(nu=nu)
+def train_model(model, train_loader, val_loader):
+# The model target is the shared rolling-60 volatility at endpoint t+h.
+    criterion = torch.nn.MSELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     best_val_loss = float('inf')
     patience = 5
@@ -63,11 +64,11 @@ def train_model(model, train_loader, val_loader, nu):
 
     for epoch in range(EPOCHS):
         model.train()
-        for x, _, y_ret, _ in train_loader:
-            x, y_ret = x.to(DEVICE), y_ret.to(DEVICE)
+        for x, y_vol, _, _ in train_loader:
+            x, y_vol = x.to(DEVICE), y_vol.to(DEVICE)
             optimizer.zero_grad()
             pred_vol = model(x)
-            loss = criterion(pred_vol, y_ret)
+            loss = criterion(pred_vol, y_vol)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -75,9 +76,9 @@ def train_model(model, train_loader, val_loader, nu):
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for x, _, y_ret, _ in val_loader:
-                x, y_ret = x.to(DEVICE), y_ret.to(DEVICE)
-                val_loss += criterion(model(x), y_ret).item()
+            for x, y_vol, _, _ in val_loader:
+                x, y_vol = x.to(DEVICE), y_vol.to(DEVICE)
+                val_loss += criterion(model(x), y_vol).item()
         val_loss /= len(val_loader)
 
         if val_loss < best_val_loss:
@@ -97,13 +98,13 @@ def train_model(model, train_loader, val_loader, nu):
 
 # Cell 5: Evaluate & Save Predictions
 cells.append(new_code_cell("""\
-def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name):
+def evaluate_and_save(model, loader, df, index_name, model_name, tier_name, split='test'):
     model.eval()
     model.to(DEVICE)
     results = []
 
     with torch.no_grad():
-        for x, y_vol, y_ret, ts in test_loader:
+        for x, y_vol, y_ret, ts in loader:
             x = x.to(DEVICE)
             pred_vol = model(x).cpu().numpy()
             y_vol = y_vol.numpy()
@@ -113,13 +114,12 @@ def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name)
                 t = ts[i]
                 for j, h in enumerate(HORIZONS):
                     idx = EVAL_INDICES[j]
-                    target_t = t + h - 1
-                    target_time = df['time'].iloc[target_t] if target_t < len(df) else None
-                    target_ret  = df['log_return'].iloc[target_t] if target_t < len(df) else None
-                    if target_time is not None:
+                    origin_time = df['time'].iloc[t] if t < len(df) else None
+                    next_return = df['log_return'].iloc[t + 1] if t + 1 < len(df) else None
+                    if origin_time is not None:
                         results.append({
-                            'time': target_time,
-                            'log_return': target_ret,
+                            'time': origin_time,
+                            'log_return': next_return,
                             'horizon': h,
                             'true_volatility': y_vol[i, idx],
                             'predict_volatility': pred_vol[i, idx]
@@ -128,7 +128,8 @@ def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name)
     res_df = pd.DataFrame(results)
     pred_dir = f'/kaggle/working/results_wavelet/all_predictions/{tier_name}'
     os.makedirs(pred_dir, exist_ok=True)
-    res_df.to_csv(f'{pred_dir}/{index_name}_{model_name}_predictions.csv', index=False)
+    suffix = '' if split == 'test' else f'_{split}'
+    res_df.to_csv(f'{pred_dir}/{index_name}_{model_name}{suffix}_predictions.csv', index=False)
 """))
 
 # Cell 6: Main Loop
@@ -156,6 +157,8 @@ for tier_name, config in TIERS_CONFIG.items():
             df = pd.DataFrame({'time': dates, 'close': np.random.randn(4059).cumsum() + 1000})
             index_name = 'DAX_40'
 
+        df['time'] = pd.to_datetime(df['time'])
+        df = df[df['time'] >= '2010-01-01'].copy()
         if 'log_return' not in df.columns:
             df['log_return'] = np.log(df['close'] / df['close'].shift(1)) * 100.0
 
@@ -168,9 +171,6 @@ for tier_name, config in TIERS_CONFIG.items():
             n_train = int(N * 0.6)
             n_val   = int(N * 0.2)
             n_test  = N - n_train - n_val
-
-        train_returns = df['log_return'].iloc[:n_train].values
-        nu = calculate_fixed_nu(train_returns)
 
         df_train = df.iloc[:n_train].copy()
         df_val   = df.iloc[max(0, n_train - 60): n_train + n_val].copy()
@@ -188,20 +188,21 @@ for tier_name, config in TIERS_CONFIG.items():
         model = WaveletAutoformer(**config)
         print(f'Training {m_name}...')
         model.to(DEVICE)
-        model = train_model(model, train_loader, val_loader, nu)
+        model = train_model(model, train_loader, val_loader)
 
         weight_dir = f'/kaggle/working/results_wavelet/models_weights/{tier_name}'
         os.makedirs(weight_dir, exist_ok=True)
         torch.save(model.state_dict(), f'{weight_dir}/{index_name}_{m_name}.pt')
 
-        evaluate_and_save(model, test_loader, df_test, index_name, m_name, tier_name)
+        evaluate_and_save(model, val_loader, df_val, index_name, m_name, tier_name, split='validation')
+        evaluate_and_save(model, test_loader, df_test, index_name, m_name, tier_name, split='test')
 
 print('\\nALL TIERS DONE! Check /kaggle/working/results_wavelet/')
 """))
 
 nb.cells = cells
 
-out_path = 'D:/UIT/1003_EPA_PROJECT/1.0.0/1003_EPA-Project_UIT/model/modify_autoformer/Wavelet Transform/kaggle_notebook_wavelet.ipynb'
-with open(out_path, 'w') as f:
+out_path = Path(__file__).with_name('kaggle_notebook_wavelet.ipynb')
+with open(out_path, 'w', encoding='utf-8') as f:
     nbformat.write(nb, f)
 print(f'Notebook written to: {out_path}')

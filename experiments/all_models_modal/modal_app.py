@@ -1,0 +1,595 @@
+"""Unified Modal launcher for the project's existing benchmark notebooks.
+
+Run from the repository root, for example:
+  py -3.11 -m modal run experiments/all_models_modal/modal_app.py --families garch,transformer
+"""
+from __future__ import annotations
+
+import io
+import os
+import re
+import sys
+import zipfile
+from datetime import datetime
+from pathlib import Path
+
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+import modal
+
+
+_MODULE_PATH = Path(__file__).resolve()
+# Locally the entrypoint is experiments/all_models_modal/modal_app.py; Modal
+# imports a staged copy as /root/modal_app.py, where that parent hierarchy does
+# not exist.  The source tree is explicitly mounted at /root/project below.
+ROOT = _MODULE_PATH.parents[2] if len(_MODULE_PATH.parents) > 2 else Path("/root/project")
+DATASET = ROOT / "dataset"
+WEIGHTS = ROOT / "model" / "Morai based" / "weights"
+APP_NAME = "volatility-benchmark-all-models"
+
+app = modal.App(APP_NAME)
+# Reuse Modal's Results volume when it exists; otherwise create it on first run.
+RESULTS_VOLUME_NAME = "Results"
+artifact_volume = modal.Volume.from_name(
+    RESULTS_VOLUME_NAME,
+    create_if_missing=True,
+)
+image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .apt_install("git")
+    .pip_install(
+        "arch", "torch==2.3.1", "pandas==2.1.4", "numpy==1.26.4",
+        "scipy==1.11.4", "matplotlib", "nbformat", "rich", "ipython",
+        "hydra-core", "jaxtyping", "jax[cpu]", "huggingface_hub",
+        "safetensors", "einops", "gluonts", "ptwt", "PyWavelets",
+    )
+    .run_commands(
+        "git clone --depth 1 https://github.com/SalesforceAIResearch/uni2ts.git /root/uni2ts",
+    )
+    .add_local_dir(ROOT, remote_path="/root/project", ignore=[".git", ".venv", "output", "tmp"])
+    .add_local_dir(DATASET, remote_path="/root/dataset")
+    .add_local_dir(WEIGHTS, remote_path="/root/weights")
+)
+
+NOTEBOOKS = {
+    "garch": "model/GARCH based/GARCH_Kaggle_Pipeline.ipynb",
+    "transformer": "model/transformer based/version_2/kaggle_notebook_v2.ipynb",
+    "moirai": "model/Morai based/notebooks/kaggle_notebook.ipynb",
+    "moiraivar": "model/moirai_var_aware/moirai_kaggle.ipynb",
+    "hybrid": "model/modify_autoformer/Hybrid GARCH-Autoformer/kaggle_notebook_hybrid.ipynb",
+    "wavelet": "model/modify_autoformer/Wavelet Transform/kaggle_notebook_wavelet.ipynb",
+}
+# AAAI24_GARCH_NN_Reproduction is intentionally excluded: it reproduces the
+# former legacy target protocol and is not part of the paper benchmark.
+LEGACY_FAMILIES = {"aaai24"}
+STANDARD_COLUMNS = [
+    "dataset", "branch", "tier", "model", "time", "horizon",
+    "log_return", "true_volatility", "predict_volatility", "split",
+]
+CANONICAL_HORIZONS = {1, 3, 5, 10, 21}
+
+
+def _key(value: object) -> str:
+    return "".join(char.lower() for char in str(value) if char.isalnum())
+
+
+def _dataset_key(value: object) -> str:
+    """Normalize legacy naming differences between notebooks and dataset files."""
+    key = _key(value)
+    return {"sp500": "snp500", "euronext100": "euronext100"}.get(key, key)
+
+
+def _series_lookup(dataset_dir: Path) -> dict[str, tuple[list[object], list[float], dict[str, int]]]:
+    """Return ordered trading calendars and one-step log returns for each dataset."""
+    import numpy as np
+    import pandas as pd
+
+    lookups: dict[str, tuple[list[object], list[float], dict[str, int]]] = {}
+    for csv_file in dataset_dir.glob("*.csv"):
+        data = pd.read_csv(csv_file)
+        data.columns = [column.strip().lower() for column in data.columns]
+        if "close" not in data.columns:
+            continue
+        times = data.get("time", data.get("date", pd.Series(range(len(data)))))
+        returns = np.log(pd.to_numeric(data["close"], errors="coerce") /
+                         pd.to_numeric(data["close"], errors="coerce").shift(1)) * 100.0
+        ordered_times = list(times)
+        ordered_returns = [float(ret) if pd.notna(ret) else np.nan for ret in returns]
+        lookups[_dataset_key(csv_file.stem)] = (
+            ordered_times,
+            ordered_returns,
+            {_key(time): index for index, time in enumerate(ordered_times)},
+        )
+    return lookups
+
+
+def _normalize_predictions(output_dir: Path) -> None:
+    """Convert every baseline prediction artifact to the project-wide MoiraiVaR schema."""
+    import numpy as np
+    import pandas as pd
+
+    destination = output_dir / "normalized_predictions"
+    destination.mkdir(parents=True, exist_ok=True)
+    series = _series_lookup(Path("/root/dataset"))
+
+    def origin_and_next_return(dataset: str, target_time: object, horizon: int) -> tuple[object, float]:
+        """Convert a horizon target timestamp back to its forecast origin on trading days."""
+        calendar, log_returns, positions = series.get(_dataset_key(dataset), ([], [], {}))
+        target_position = positions.get(_key(target_time))
+        if target_position is None:
+            return target_time, np.nan
+        origin_position = target_position - int(horizon) + 1
+        if origin_position < 0:
+            return target_time, np.nan
+        # MoiraiVaR convention: time=t and log_return=r_(t+1).
+        next_position = origin_position + 1
+        next_return = log_returns[next_position] if next_position < len(log_returns) else np.nan
+        return calendar[origin_position], next_return
+
+    def split_for(path: Path, frame: pd.DataFrame) -> str:
+        if "split" in frame.columns:
+            values = frame["split"].dropna().astype(str).unique()
+            if len(values) == 1 and values[0] in {"validation", "test"}:
+                return values[0]
+        return "validation" if "_validation_predictions" in path.name else "test"
+
+    def output_name(prefix: str, path: Path, split: str) -> str:
+        suffix = "" if split == "test" else "_validation"
+        return f"{prefix}{suffix}_predictions.csv"
+
+    def base_stem(path: Path) -> str:
+        return path.stem.removesuffix("_validation_predictions").removesuffix("_predictions")
+
+    for csv_file in (output_dir / "garch" / "predictions").glob("*_predictions.csv"):
+        frame = pd.read_csv(csv_file)
+        split = split_for(csv_file, frame)
+        dataset = str(frame["dataset"].iloc[0])
+        model = str(frame["model"].iloc[0])
+        is_hybrid = model == "GARCH-LSTM-Hybrid"
+        normalized = pd.DataFrame({
+            "dataset": dataset,
+            "branch": "GARCH_LSTM" if is_hybrid else "GARCH",
+            "tier": "hybrid" if is_hybrid else "statistical",
+            "model": model,
+            "time": frame["time"],
+            "horizon": frame["horizon"],
+            # New GARCH exports already carry canonical origin-aligned
+            # r[t+1].  Retain a fallback only for legacy artifacts.
+            "log_return": (
+                frame["log_return"]
+                if "log_return" in frame.columns
+                else [origin_and_next_return(dataset, time, 1)[1] for time in frame["time"]]
+            ),
+            "true_volatility": frame["actual_vol"],
+            "predict_volatility": frame["pred_vol"],
+            "split": split,
+        })
+        normalized.to_csv(destination / output_name(f"{dataset}_{model}", csv_file, split), index=False)
+
+    transformer_root = output_dir / "transformer" / "all_predictions"
+    for csv_file in transformer_root.rglob("*_predictions.csv"):
+        frame = pd.read_csv(csv_file)
+        split = split_for(csv_file, frame)
+        tier = csv_file.parent.name
+        stem = base_stem(csv_file)
+        dataset, model = stem.rsplit("_", 1)
+        normalized = pd.DataFrame({
+            "dataset": dataset,
+            "branch": "Transformers",
+            "tier": tier,
+            "model": model,
+            # Transformer exports use the common origin t and r[t+1]
+            # directly; do not reinterpret `time` as a target timestamp.
+            "time": frame["time"],
+            "horizon": frame["horizon"],
+            "log_return": frame["log_return"],
+            "true_volatility": frame["true_volatility"],
+            "predict_volatility": frame["predict_volatility"],
+            "split": split,
+        })
+        normalized.to_csv(destination / output_name(f"{tier}_{dataset}_{model}", csv_file, split), index=False)
+
+    for family_dir, branch in (("hybrid", "modified_autoformer"), ("wavelet", "modified_autoformer")):
+        for csv_file in (output_dir / family_dir / "all_predictions").rglob("*_predictions.csv"):
+            frame = pd.read_csv(csv_file)
+            split = split_for(csv_file, frame)
+            tier = csv_file.parent.name
+            dataset, model = base_stem(csv_file).rsplit("_", 1)
+            normalized = pd.DataFrame({
+                "dataset": dataset,
+                "branch": branch,
+                "tier": tier,
+                "model": model,
+                "time": frame["time"],
+                "horizon": frame["horizon"],
+                "log_return": frame["log_return"],
+                "true_volatility": frame["true_volatility"],
+                "predict_volatility": frame["predict_volatility"],
+                "split": split,
+            })
+            normalized.to_csv(destination / output_name(f"{family_dir}_{tier}_{dataset}_{model}", csv_file, split), index=False)
+
+    for csv_file in (output_dir / "moirai" / "predictions").glob("*_predictions.csv"):
+        frame = pd.read_csv(csv_file)
+        split = split_for(csv_file, frame)
+        dataset, model = base_stem(csv_file).rsplit("_", 1)
+        normalized = pd.DataFrame({
+            "dataset": dataset,
+            "branch": "Moirai",
+            "tier": "baseline",
+            "model": model,
+            "time": frame["time"],
+            "horizon": frame["horizon"],
+            "log_return": frame["log_return"],
+            "true_volatility": frame["true_volatility"],
+            "predict_volatility": frame["predict_volatility"],
+            "split": split,
+        })
+        normalized.to_csv(destination / output_name(f"Moirai_{dataset}_{model}", csv_file, split), index=False)
+
+    # MoiraiVaR emits native rows with its branch/tier already populated.
+    # _prepare_notebook writes those rows beside its ZIP archive so they are
+    # treated identically to every other family during normalization.
+    for csv_file in (output_dir / "moiraivar" / "predictions").glob("*_predictions.csv"):
+        frame = pd.read_csv(csv_file)
+        split = split_for(csv_file, frame)
+        if "split" not in frame.columns:
+            frame["split"] = split
+        normalized = frame.reindex(columns=STANDARD_COLUMNS)
+        normalized.to_csv(destination / output_name(f"MoiraiVaR_{base_stem(csv_file)}", csv_file, split), index=False)
+
+    # Fail closed before an artifact can be promoted.  This validates the
+    # contract at the boundary shared by every model family, instead of
+    # allowing a malformed family export to be silently merged later.
+    required = set(STANDARD_COLUMNS)
+    for normalized_file in sorted(destination.glob("*.csv")):
+        frame = pd.read_csv(normalized_file)
+        missing = required - set(frame.columns)
+        if missing:
+            raise ValueError(f"{normalized_file.name}: missing canonical columns {sorted(missing)}")
+        if set(frame["split"].dropna().astype(str).unique()) - {"validation", "test"}:
+            raise ValueError(f"{normalized_file.name}: invalid split values")
+        if not set(frame["horizon"].dropna().astype(int).unique()).issubset(CANONICAL_HORIZONS):
+            raise ValueError(f"{normalized_file.name}: invalid horizon values")
+        if frame.empty:
+            raise ValueError(f"{normalized_file.name}: empty prediction artifact")
+        horizons = set(pd.to_numeric(frame["horizon"], errors="coerce").dropna().astype(int))
+        if not horizons or not horizons.issubset(CANONICAL_HORIZONS):
+            raise ValueError(f"{normalized_file.name}: invalid horizons {sorted(horizons)}")
+        numeric = frame[["horizon", "log_return", "true_volatility", "predict_volatility"]]
+        if not np.isfinite(numeric.to_numpy(dtype=float)).all():
+            raise ValueError(f"{normalized_file.name}: non-finite canonical values")
+        if (frame["true_volatility"] < 0).any() or (frame["predict_volatility"] < 0).any():
+            raise ValueError(f"{normalized_file.name}: volatility must be non-negative")
+        if frame.duplicated(["dataset", "branch", "tier", "model", "time", "horizon"]).any():
+            raise ValueError(f"{normalized_file.name}: duplicate origin/horizon rows")
+
+
+def _prepare_notebook(source: Path, destination: Path, output_dir: Path, smoke_test: bool = False, lambda_sweep: str = "0,0.05,0.1,0.2,0.5,1") -> None:
+    """Make the committed Kaggle notebook portable without altering its source file."""
+    import nbformat
+
+    notebook = nbformat.read(source, as_version=4)
+    for cell in notebook.cells:
+        if cell.cell_type != "code":
+            continue
+        # Kaggle shell setup clones an old branch / placeholder URL; Modal already has source.
+        lines = [line for line in cell.source.splitlines() if not line.lstrip().startswith("!")]
+        text = "\n".join(lines)
+        text = text.replace("/kaggle/working/1003_EPA-Project_UIT", "/root/project")
+        text = text.replace("/kaggle/working/repo", "/root/project")
+        text = text.replace("/kaggle/working/uni2ts/src", "/root/uni2ts/src")
+        text = text.replace("'uni2ts/src/uni2ts/model'", "'/root/uni2ts/src/uni2ts/model'")
+        text = text.replace("'uni2ts/src'", "'/root/uni2ts/src'")
+        text = text.replace("/kaggle/input/datasets/trnhngv/historical-price", "/root/dataset")
+        text = text.replace("/kaggle/input/datasets/trnhngv/weights", "/root/weights")
+        text = text.replace("/kaggle/working/results_hybrid", (output_dir / "hybrid").as_posix())
+        text = text.replace("/kaggle/working/results_wavelet", (output_dir / "wavelet").as_posix())
+        text = text.replace("/kaggle/working/results_v2", (output_dir / "transformer").as_posix())
+        text = text.replace("/kaggle/working/results", (output_dir / "garch").as_posix())
+        text = text.replace("/kaggle/working/moirai_var", (output_dir / "moiraivar" / "moirai_var").as_posix())
+        text = text.replace("/kaggle/working/predictions", (output_dir / "moirai" / "predictions").as_posix())
+        target_zip = (output_dir / "moirai" / "all_predictions").as_posix()
+        text = text.replace(
+            "zip_filename = '/kaggle/working/all_predictions'",
+            f"zip_filename = '{target_zip}'",
+        )
+        text = text.replace("/kaggle/input/volatility-dataset/dataset/", "/root/dataset")
+        text = text.replace("/kaggle/input/datasets/trnhngv/weights/weights", "/root/weights")
+        # The baseline notebook's Kaggle path contains a duplicated `weights`
+        # component; the Modal mount is already the weights directory itself.
+        text = text.replace("/root/weights/weights", "/root/weights")
+        # The MoiraiVaR notebook is the official reviewer ablation.  Keep its
+        # grid explicit in the prepared artifact, independent of stale Kaggle
+        # notebook defaults.
+        text = text.replace(
+            "LAMBDA_VARS = [0.0, 0.05, 0.1, 0.2, 0.5, 1.0]",
+            f"LAMBDA_VARS = {[float(value.strip()) for value in lambda_sweep.split(',') if value.strip()]}",
+        )
+        # Legacy notebooks are mounted as immutable inputs. Rewrite their
+        # embedded target/export cells so every Modal family uses the same
+        # rolling-60 target at the future endpoint t+h.
+        rolling_target = (
+            "target_position = t + h\n"
+            "                target_window = self.returns[target_position - 59: target_position + 1]\n"
+            "                y.append(np.std(target_window, ddof=0))"
+        )
+        text = re.sub(
+            r"future_returns = self\.returns\[t \+ 1\s*:\s*t \+ h \+ 1\]\s*\n\s*y\.append\(np\.(?:sqrt\(np\.mean\(future_returns \*\* 2\)\)|std\(future_returns, ddof=0\))\)",
+            rolling_target,
+            text,
+        )
+        text = text.replace("origin_t = t - 1\n                    origin_time = df['time'].iloc[origin_t] if origin_t >= 0 else None\n                    next_return = df['log_return'].iloc[t] if t < len(df) else None",
+                            "origin_time = df['time'].iloc[t] if t < len(df) else None\n                    next_return = df['log_return'].iloc[t + 1] if t + 1 < len(df) else None")
+        text = text.replace("origin_times, stat_test_r, pred_dir)",
+                            "origin_times, stat_test_r, pred_dir, history_returns=stat_train_r)")
+        text = text.replace("hybrid_origin_times, hybrid_future_returns, pred_dir)",
+                            "hybrid_origin_times, hybrid_future_returns, pred_dir, history_returns=test_r.iloc[:DEFAULT_SEQ_LEN])")
+        if smoke_test:
+            text = text.replace("for index_name in SPLIT_INFO.keys():", "for index_name in list(SPLIT_INFO.keys())[:1]:")
+            text = text.replace("DATASETS_TO_TRAIN = list(SPLIT_INFO.keys())", "DATASETS_TO_TRAIN = list(SPLIT_INFO.keys())[:1]")
+            # Some statistical notebooks enumerate raw dataset files instead
+            # of SPLIT_INFO; keep smoke runs to one market in that path too.
+            text = text.replace("for csv_file in csv_files:", "for csv_file in csv_files[:1]:")
+            text = text.replace("for fpath in csv_files:", "for fpath in csv_files[:1]:")
+            text = text.replace("EPOCHS = 30", "EPOCHS = 1")
+            text = text.replace("EPOCHS = 50", "EPOCHS = 1")
+            text = text.replace("EPOCHS=50", "EPOCHS=1")
+            # GARCH imports its epoch count from config.py rather than
+            # defining a literal in the notebook.
+            text = text.replace(
+                "from config import DEFAULT_SEQ_LEN, DEFAULT_VOL_WINDOW, HORIZONS, BATCH_SIZE, EPOCHS, LR, DEVICE, FIXED_SPLITS",
+                "from config import DEFAULT_SEQ_LEN, DEFAULT_VOL_WINDOW, HORIZONS, BATCH_SIZE, EPOCHS, LR, DEVICE, FIXED_SPLITS\nEPOCHS = 1",
+            )
+            text = text.replace("epochs=30", "epochs=1")
+            text = text.replace(
+                "LAMBDA_VARS = [0.0, 0.05, 0.1, 0.2, 0.5, 1.0]",
+                "LAMBDA_VARS = [0.0, 0.2]",
+            )
+            text = text.replace(
+                f"LAMBDA_VARS = {[float(value.strip()) for value in lambda_sweep.split(',') if value.strip()]}",
+                "LAMBDA_VARS = [0.0, 0.2]",
+            )
+            text = text.replace("for epoch in range(EPOCHS):", "for epoch in range(min(EPOCHS, 1)):")
+        # Preserve trained MoiraiVaR state dicts, which the original notebook only exported as CSV.
+        marker = "csv_outputs[filename] = frame.to_csv(index=False)"
+        if marker in text:
+            text = text.replace(
+                marker,
+                marker + "\n            prediction_path = f'/root/modal_output/moiraivar/predictions/{filename}'\n            os.makedirs(os.path.dirname(prediction_path), exist_ok=True)\n            frame.to_csv(prediction_path, index=False)\n            validation_filename = filename.replace('_predictions.csv', '_validation_predictions.csv')\n            val_frame.to_csv(f'/root/modal_output/moiraivar/predictions/{validation_filename}', index=False)\n            weights_path = f'/root/modal_output/moiraivar/weights/{index_name}_{model_type}{mode_suffix}_lambda_{lambda_var:g}.pt'\n            os.makedirs(os.path.dirname(weights_path), exist_ok=True)\n            torch.save(model.state_dict(), weights_path)",
+            )
+        baseline_marker = "df_out.to_csv(csv_filename, index=False)"
+        if baseline_marker in text:
+            text = text.replace(
+                baseline_marker,
+                baseline_marker + "\n        weights_path = os.path.join('/root/modal_output/moirai/weights', f'{index_name}_{m_type}.pt')\n        os.makedirs(os.path.dirname(weights_path), exist_ok=True)\n        torch.save(model.state_dict(), weights_path)",
+                )
+        forbidden_target_fragments = (
+            "np.sqrt(np.mean(future_returns ** 2))",
+            "target_t = t + h - 1",
+            "np.std(future_returns, ddof=0)",
+        )
+        stale = [fragment for fragment in forbidden_target_fragments if fragment in text]
+        if stale:
+            raise ValueError(
+                f"{source.name}: stale target/origin code remains after preparation: {stale}"
+            )
+        if "future_returns = self.returns[t + 1: t + h + 1]" in text:
+            raise ValueError(f"{source.name}: stale future-window target remains")
+        # Emit structured milestones during the long-running legacy notebooks.
+        text = text.replace(
+            "for csv_file in csv_files:",
+            "for csv_file in csv_files:\n        reporter.dataset(Path(csv_file).stem)",
+        )
+        text = text.replace(
+            "for stat_model_name in MODEL_SPECS.keys():",
+            "for stat_model_name in MODEL_SPECS.keys():\n            reporter.model(stat_model_name, tier='statistical')",
+        )
+        text = text.replace(
+            "print(f\"--- Running GARCH-LSTM Hybrid ---\")",
+            "reporter.model('GARCH-LSTM-Hybrid', tier='hybrid')\n        print(f\"--- Running GARCH-LSTM Hybrid ---\")",
+        )
+        text = text.replace(
+            "for tier_name, config in TIERS_CONFIG.items():",
+            "for tier_name, config in TIERS_CONFIG.items():\n    reporter.tier(tier_name)",
+        )
+        text = text.replace(
+            "for m_name, model in models_dict.items():",
+            "for m_name, model in models_dict.items():\n            reporter.model(m_name, tier=tier_name)",
+        )
+        text = text.replace(
+            "for m_type in ['moirai', 'moirai2', 'moirai_moe']:",
+            "for m_type in ['moirai', 'moirai2', 'moirai_moe']:\n        reporter.model(m_type, tier='baseline')",
+        )
+        text = text.replace(
+            "for epoch in range(EPOCHS):",
+            "for epoch in range(EPOCHS):\n        reporter.epoch(epoch + 1, EPOCHS)",
+        )
+        text = text.replace(
+            "for epoch in range(epochs):",
+            "for epoch in range(epochs):\n        reporter.epoch(epoch + 1, epochs)",
+        )
+        cell.source = text
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    nbformat.write(notebook, destination)
+
+
+@app.function(image=image, gpu="A10G", timeout=60 * 60 * 8, volumes={"/root/persist": artifact_volume})
+def run_selected(families: list[str], smoke_test: bool = False, run_id: str = "latest", lambda_sweep: str = "0,0.05,0.1,0.2,0.5,1") -> bytes:
+    import os
+    import sys
+    import time
+    import nbformat
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.rule import Rule
+
+    class Reporter:
+        def __init__(self) -> None:
+            self.console = Console(force_terminal=True, color_system="truecolor")
+            self.family = ""
+            self.current_model = ""
+            self.current_dataset = ""
+            self.started = time.monotonic()
+
+        def begin(self, family: str) -> None:
+            self.family = family
+            self.console.print(Panel.fit(f"[bold cyan]START[/] [white]{family.upper()}[/]", border_style="cyan"))
+
+        def dataset(self, name: str) -> None:
+            self.current_dataset = name
+            self.console.print(f"[bold yellow]DATASET[/] [white]{name}[/]")
+
+        def tier(self, name: str) -> None:
+            self.console.print(f"[bold magenta]TIER[/] [white]{name}[/]")
+
+        def model(self, name: str, tier: str = "") -> None:
+            self.current_model = name
+            suffix = f"  [dim]tier={tier}[/]" if tier else ""
+            self.console.print(f"[bold green]MODEL[/] [white]{name}[/]{suffix}")
+
+        def epoch(self, current: int, total: int) -> None:
+            # Rich output is retained in Modal Logs, unlike notebook cell output.
+            self.console.print(
+                f"[cyan]EPOCH[/] [bold]{current:>2}/{total}[/]  "
+                f"[dim]{self.current_dataset} · {self.current_model}[/]"
+            )
+
+        def cell(self, current: int, total: int) -> None:
+            self.console.print(f"[dim]executing cell {current}/{total} ({self.family})[/]")
+
+        def done(self, family: str) -> None:
+            elapsed = time.monotonic() - self.started
+            self.console.print(Rule(f"[bold green]DONE {family.upper()} · {elapsed / 60:.1f} min[/]"))
+
+    output_dir = Path("/root/modal_output")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    reporter = Reporter()
+    family_paths = {
+        "garch": "/root/project/model/GARCH based",
+        "transformer": "/root/project/model/transformer based/version_2",
+        "moirai": "/root/project/model/Morai based/notebooks",
+        "moiraivar": "/root/project",
+        "hybrid": "/root/project/model/modify_autoformer/Hybrid GARCH-Autoformer",
+        "wavelet": "/root/project/model/modify_autoformer/Wavelet Transform",
+    }
+    for family in families:
+        reporter.begin(family)
+        source = Path("/root/project") / NOTEBOOKS[family]
+        prepared = Path("/root/prepared_notebooks") / f"{family}.ipynb"
+        _prepare_notebook(source, prepared, output_dir, smoke_test=smoke_test, lambda_sweep=lambda_sweep)
+        # The legacy notebooks use generic module names (dataset, models,
+        # config, utils).  Remove the preceding family's modules before
+        # executing the next notebook, otherwise Transformer imports GARCH's
+        # dataset.py in the same long-lived Modal process.
+        for module_name in ("dataset", "models", "config", "utils", "losses"):
+            sys.modules.pop(module_name, None)
+        family_path = family_paths[family]
+        sys.path[:] = [path for path in sys.path if path not in family_paths.values()]
+        sys.path.insert(0, family_path)
+
+        notebook = nbformat.read(prepared, as_version=4)
+        namespace = {"__name__": "__main__", "__file__": str(prepared), "reporter": reporter}
+        os.environ["PYTHONPATH"] = "/root/project:/root/uni2ts/src"
+        for cell_number, cell in enumerate(notebook.cells, start=1):
+            if cell.cell_type != "code" or not cell.source.strip():
+                continue
+            reporter.cell(cell_number, len(notebook.cells))
+            exec(compile(cell.source, f"{prepared}:cell-{cell_number}", "exec"), namespace)
+        if family == "moiraivar":
+            from experiments.moirai_var_aware.evaluate_lambda_sweep import evaluate_lambda_sweep
+            ablation_dir = output_dir / "moiraivar" / "lambda_ablation"
+            if ablation_dir.exists():
+                import shutil
+                shutil.rmtree(ablation_dir)
+            evaluate_lambda_sweep(output_dir / "moiraivar" / "predictions", ablation_dir)
+        reporter.done(family)
+        # Publish immediately after this family's CSV artifacts exist.  This
+        # checkpoint survives failures in later families and makes completed
+        # normalized predictions visible on the Volume without waiting for the
+        # local entrypoint to collect every remote call.
+        _normalize_predictions(output_dir)
+        import shutil
+        persistent_run = Path("/root/persist") / run_id
+        if persistent_run.exists():
+            shutil.rmtree(persistent_run)
+        shutil.copytree(output_dir, persistent_run)
+        artifact_volume.commit()
+        print(f"published to Modal Volume: {persistent_run}")
+
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file in output_dir.rglob("*"):
+            relative_parts = {part.lower() for part in file.relative_to(output_dir).parts}
+            is_weight_artifact = bool(relative_parts & {"weights", "models_weights", "model_params"}) or file.suffix.lower() in {".pt", ".pth", ".safetensors"}
+            if file.is_file() and not is_weight_artifact:
+                zf.write(file, file.relative_to(output_dir))
+    return archive.getvalue()
+
+
+@app.local_entrypoint()
+def main(families: str = "garch,transformer,moirai,moiraivar,hybrid,wavelet", output_dir: str = "output", smoke_test: bool = False, lambda_sweep: str = "0,0.05,0.1,0.2,0.5,1"):
+    selected = [item.strip().lower() for item in families.split(",") if item.strip()]
+    invalid = sorted(set(selected) - set(NOTEBOOKS))
+    if invalid:
+        raise ValueError(f"Unknown family: {', '.join(invalid)}. Choose: {', '.join(NOTEBOOKS)}")
+    if not selected:
+        raise ValueError("Select at least one family")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    local_run_dir = ROOT / output_dir / timestamp
+    local_run_dir.mkdir(parents=True, exist_ok=False)
+    # Start each family concurrently in its own isolated container.  Calling
+    # spawn first for every family is important: waiting immediately would
+    # serialize the workloads again.  Each completed call is downloaded as
+    # soon as it is collected, so a later failure cannot erase earlier output.
+    calls = {}
+    for family in selected:
+        print(f"starting Modal family in parallel: {family}")
+        calls[family] = run_selected.spawn([family], smoke_test=smoke_test, run_id=f"{timestamp}/{family}", lambda_sweep=lambda_sweep)
+
+    weight_paths = {
+        # Legacy notebooks create a family-named results directory after the
+        # family root has already been rewritten by _prepare_notebook.
+        "garch": "garch/garch/model_params",
+        "transformer": "transformer/transformer/models_weights",
+        "moirai": "moirai/moirai/weights",
+        "moiraivar": "moiraivar/moiraivar/weights",
+        "hybrid": "hybrid/hybrid/models_weights",
+        "wavelet": "wavelet/wavelet/models_weights",
+    }
+    for family, call in calls.items():
+        archive_path = local_run_dir / f"{family}_artifacts.zip"
+        try:
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            archive_path.write_bytes(call.get())
+            with zipfile.ZipFile(archive_path) as zf:
+                zf.extractall(local_run_dir)
+            # Weights are persisted in the Modal Volume (not in the in-memory
+            # return zip) and downloaded separately to avoid MemoryError.
+            import subprocess
+            import sys
+            local_weights = local_run_dir / family / Path(weight_paths[family]).relative_to(family)
+            local_weights.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                [sys.executable, "-m", "modal", "volume", "get",
+                 RESULTS_VOLUME_NAME, f"/{timestamp}/{weight_paths[family]}",
+                 str(local_weights), "--force"],
+                check=True,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            )
+            print(f"downloaded completed family: {family} -> {local_run_dir}")
+        except Exception as exc:
+            print(f"family failed: {family}: {type(exc).__name__}: {exc}")
+        finally:
+            if archive_path.exists():
+                archive_path.unlink()
+    (local_run_dir / "run_manifest.txt").write_text(
+        f"families={','.join(selected)}\nlambda_sweep={lambda_sweep}\nmodal_app={APP_NAME}\ncreated_at={timestamp}\n",
+        encoding="utf-8",
+    )
+    print(f"saved artifacts to {local_run_dir}")

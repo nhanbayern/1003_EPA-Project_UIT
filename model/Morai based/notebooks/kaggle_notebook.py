@@ -57,33 +57,29 @@ class VolatilityDataset(Dataset):
         df['returns'] = self.returns
         self.times = df['time'].values
 
-        # Chi tao mau tu 2010-01-01 tro di (truoc 2010 la burn-in)
+        # Chi tao mau tu 2010-01-01 tro di (truoc 2010 la burn-in).
+        # `time` is the forecast origin t; targets follow samplepaper.tex.
         self.valid_indices = df[df['time'] >= '2010-01-01'].index.tolist()
         self.samples = []
         n = len(self.returns)
 
-        for t in self.valid_indices:
-            x = self.returns[t - lookback: t]
+        for origin_position, t in enumerate(self.valid_indices):
+            if t < lookback - 1 or t + max(horizons) >= n:
+                continue
+
+            # Observations through and including t are available at the origin.
+            x = self.returns[t - lookback + 1: t + 1]
             y = []
             for h in horizons:
-                # Target volatility is standard deviation of 60 days ending at t + h - 2 (inclusive)
-                # In Python slice, this corresponds to returns[t + h - 1 - lookback : t + h - 1]
-                start_target_idx = t + h - 1 - lookback
-                end_target_idx = t + h - 1
-                
-                # Check boundary to avoid indexing out of bounds at the end of the dataset
-                if end_target_idx > n:
-                    end_target_idx = n
-                    start_target_idx = max(0, n - lookback)
-                
-                target_r = self.returns[start_target_idx:end_target_idx]
-                vol = np.std(target_r)
-                y.append(vol)
+                target_position = t + h
+                target_window = self.returns[target_position - lookback + 1: target_position + 1]
+                y.append(np.std(target_window, ddof=0))
             self.samples.append({
                 'x': torch.tensor(x, dtype=torch.float32),
                 'y': torch.tensor(y, dtype=torch.float32),
                 'time': self.times[t],
-                'log_return': self.returns[t]
+                'log_return': self.returns[t + 1],
+                'origin_position': origin_position,
             })
 
 
@@ -101,9 +97,19 @@ def load_and_split_dataset(csv_path, index_name, split_info):
     train_size = split_info[index_name]['train']
     val_size = split_info[index_name]['validation']
     test_size = split_info[index_name]['test']
-    train_ds = torch.utils.data.Subset(full_ds, range(0, train_size))
-    val_ds = torch.utils.data.Subset(full_ds, range(train_size, train_size + val_size))
-    test_ds = torch.utils.data.Subset(full_ds, range(train_size + val_size, train_size + val_size + test_size))
+    # Purge the final max-horizon origins of each split so that no target
+    # reaches into the subsequent validation or test period.
+    max_horizon = max(full_ds.horizons)
+    def subset_for(start, end):
+        indices = [
+            i for i, sample in enumerate(full_ds.samples)
+            if start <= sample['origin_position'] < end - max_horizon
+        ]
+        return torch.utils.data.Subset(full_ds, indices)
+
+    train_ds = subset_for(0, train_size)
+    val_ds = subset_for(train_size, train_size + val_size)
+    test_ds = subset_for(train_size + val_size, train_size + val_size + test_size)
     return train_ds, val_ds, test_ds
 
 
@@ -248,7 +254,8 @@ class VolatilityRegressionModel(nn.Module):
             nn.Linear(extractor.d_model, hidden_dim),
             nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(hidden_dim, output_dim)
+            nn.Linear(hidden_dim, output_dim),
+            nn.Softplus(),
         )
 
     def forward(self, x):
@@ -331,6 +338,25 @@ def evaluate_model(model, test_loader, device='cuda'):
     return metrics_summary, preds, targets
 
 
+def save_prediction_csv(output_dir, index_name, model_type, subset, preds, targets, split):
+    rows = []
+    full_ds = subset.dataset
+    for k, idx in enumerate(subset.indices):
+        sample = full_ds.samples[idx]
+        for h_idx, h in enumerate([1, 3, 5, 10, 21]):
+            rows.append({
+                'time': sample['time'],
+                'log_return': sample['log_return'],
+                'horizon': h,
+                'true_volatility': targets[k, h_idx],
+                'predict_volatility': preds[k, h_idx],
+            })
+    suffix = '' if split == 'test' else f'_{split}'
+    path = os.path.join(output_dir, f'{index_name}_{model_type}{suffix}_predictions.csv')
+    pd.DataFrame(rows).to_csv(path, index=False)
+    print(f'Saved {split}: {path}')
+
+
 # %% CELL 10 (python) --- Full comparison pipeline
 import os
 
@@ -350,26 +376,16 @@ def run_comparison_pipeline(csv_path, index_name, device='cuda', weights_dir=Non
         extractor = VolatilityFeatureExtractor(model_type=m_type, size='small', device=device, weights_dir=weights_dir)
         model = VolatilityRegressionModel(extractor=extractor)
         model = train_model(model, train_loader, val_loader, epochs=30, device=device)
+        _, val_preds, val_targets = evaluate_model(model, val_loader, device=device)
         metrics, preds, targets = evaluate_model(model, test_loader, device=device)
         results[m_type] = {'metrics': metrics, 'preds': preds, 'targets': targets}
 
         # Lưu file CSV kết quả cho từng mô hình và từng chỉ số
-        csv_rows = []
-        full_ds = test_ds.dataset
-        for k, idx in enumerate(test_ds.indices):
-            sample = full_ds.samples[idx]
-            for h_idx, h in enumerate([1, 3, 5, 10, 21]):
-                csv_rows.append({
-                    'time': sample['time'],
-                    'log_return': sample['log_return'],
-                    'horizon': h,
-                    'true_volatility': targets[k, h_idx],
-                    'predict_volatility': preds[k, h_idx]
-                })
-        df_out = pd.DataFrame(csv_rows)
-        csv_filename = os.path.join(output_dir, f"{index_name}_{m_type}_predictions.csv")
-        df_out.to_csv(csv_filename, index=False)
-        print(f"Saved: {csv_filename}")
+        save_prediction_csv(output_dir, index_name, m_type, val_ds, val_preds, val_targets, 'validation')
+        save_prediction_csv(output_dir, index_name, m_type, test_ds, preds, targets, 'test')
+        trained_weights_dir = os.path.join(os.path.dirname(output_dir), 'weights')
+        os.makedirs(trained_weights_dir, exist_ok=True)
+        torch.save(model.state_dict(), os.path.join(trained_weights_dir, f'{index_name}_{m_type}.pt'))
 
     return results
 

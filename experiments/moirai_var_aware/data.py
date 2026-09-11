@@ -9,39 +9,56 @@ from .config import HORIZONS, LOOKBACK, SPLIT_INFO
 
 
 class VolatilityDataset(Dataset):
-    """Return-window samples with volatility targets and realized return for VaR loss."""
+    """Origin-inclusive 60-return contexts with rolling-60 future targets."""
 
     def __init__(self, df: pd.DataFrame, lookback: int = LOOKBACK, horizons: list[int] | None = None) -> None:
         self.lookback = lookback
         self.horizons = horizons or HORIZONS
 
+        if lookback < 1 or not self.horizons or any(int(h) < 1 for h in self.horizons):
+            raise ValueError("lookback and horizons must be positive")
+        required = {"time", "close"}
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"Missing required columns: {sorted(missing)}")
+
         df = df.sort_values("time").reset_index(drop=True)
         close = df["close"].values
+        if not np.isfinite(close.astype(float)).all() or (close <= 0).any():
+            raise ValueError("close must contain finite positive prices")
         returns = np.diff(np.log(close)) * 100
         self.returns = np.concatenate([[0.0], returns])
         df["returns"] = self.returns
         self.times = df["time"].values
 
-        self.valid_indices = df[df["time"] >= "2010-01-01"].index.tolist()
+        self.valid_indices = [
+            i for i in df[df["time"] >= "2010-01-01"].index.tolist()
+            if i >= lookback - 1
+        ]
         self.samples = []
         n_returns = len(self.returns)
 
-        for t in self.valid_indices:
-            x = self.returns[t - lookback : t]
+        for origin_position, t in enumerate(self.valid_indices):
+            if t + max(self.horizons) >= n_returns:
+                continue
+
+            x = self.returns[t - lookback + 1 : t + 1]
             y = []
             for horizon in self.horizons:
-                start = t + horizon - 1 - lookback
-                end = t + horizon - 1
-                if end > n_returns:
-                    end = n_returns
-                    start = max(0, n_returns - lookback)
-                y.append(np.std(self.returns[start:end]))
+                # Forecast origin t may only use observations through r[t].
+                # Target is rolling volatility at the future endpoint t+h.
+                target_position = t + horizon
+                target_window = self.returns[
+                    target_position - lookback + 1 : target_position + 1
+                ]
+                y.append(np.std(target_window, ddof=0))
             self.samples.append(
                 {
                     "x": torch.tensor(x, dtype=torch.float32),
                     "y": torch.tensor(y, dtype=torch.float32),
                     "time": self.times[t],
-                    "log_return": float(self.returns[t]),
+                    "log_return": float(self.returns[t + 1]),
+                    "origin_position": origin_position,
                 }
             )
 
@@ -65,8 +82,24 @@ def load_and_split_dataset(csv_path: str, index_name: str):
     val_size = split["validation"]
     test_size = split["test"]
 
-    train_ds = torch.utils.data.Subset(full_ds, range(0, train_size))
-    val_ds = torch.utils.data.Subset(full_ds, range(train_size, train_size + val_size))
-    test_ds = torch.utils.data.Subset(full_ds, range(train_size + val_size, train_size + val_size + test_size))
-    return train_ds, val_ds, test_ds
+    max_horizon = max(full_ds.horizons)
+    if train_size <= max_horizon or val_size <= max_horizon or test_size <= max_horizon:
+        raise ValueError("Each split must be longer than the maximum forecast horizon")
+    val_start, val_end = train_size, train_size + val_size
+    test_start, test_end = val_end, val_end + test_size
 
+    def subset_for(start, end):
+        allowed = {
+            s["origin_position"]
+            for s in full_ds.samples
+            if start <= s["origin_position"] < end - max_horizon
+        }
+        indices = [i for i, s in enumerate(full_ds.samples) if s["origin_position"] in allowed]
+        if not indices:
+            raise ValueError(f"No usable purged origins in split [{start}, {end})")
+        return torch.utils.data.Subset(full_ds, indices)
+
+    train_ds = subset_for(0, train_size)
+    val_ds = subset_for(val_start, val_end)
+    test_ds = subset_for(test_start, test_end)
+    return train_ds, val_ds, test_ds

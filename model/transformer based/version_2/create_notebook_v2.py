@@ -1,5 +1,6 @@
 import nbformat
 from nbformat.v4 import new_notebook, new_code_cell
+from pathlib import Path
 
 nb = new_notebook()
 
@@ -24,7 +25,7 @@ import torch
 from torch.utils.data import DataLoader
 from dataset import VolatilityDataset
 from models import VanillaTransformer, Autoformer, Informer, Reformer
-from utils import calculate_fixed_nu, StudentTNLLLoss, calc_mse, calc_mae, calc_qlike, plot_loss_curve, plot_predictions
+from utils import calc_mse, calc_mae, calc_qlike, plot_loss_curve, plot_predictions
 from config import TIERS_CONFIG
 import glob
 from pathlib import Path
@@ -58,8 +59,10 @@ SPLITS = {
 
 # Cell 4: Train Function
 cells.append(new_code_cell("""\
-def train_model(model, train_loader, val_loader, nu):
-    criterion = StudentTNLLLoss(nu=nu)
+def train_model(model, train_loader, val_loader):
+    # The dataset constructs future-realized std targets.  Keep training and
+    # model selection on that declared target only.
+    criterion = torch.nn.MSELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     best_val_loss = float('inf')
     patience = 5
@@ -72,11 +75,11 @@ def train_model(model, train_loader, val_loader, nu):
     for epoch in range(EPOCHS):
         model.train()
         train_loss = 0
-        for x, _, y_ret, _ in train_loader:
-            x, y_ret = x.to(DEVICE), y_ret.to(DEVICE)
+        for x, y_vol, _, _ in train_loader:
+            x, y_vol = x.to(DEVICE), y_vol.to(DEVICE)
             optimizer.zero_grad()
             pred_vol = model(x)
-            loss = criterion(pred_vol, y_ret)
+            loss = criterion(pred_vol, y_vol)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -88,10 +91,10 @@ def train_model(model, train_loader, val_loader, nu):
         model.eval()
         val_loss = 0
         with torch.no_grad():
-            for x, _, y_ret, _ in val_loader:
-                x, y_ret = x.to(DEVICE), y_ret.to(DEVICE)
+            for x, y_vol, _, _ in val_loader:
+                x, y_vol = x.to(DEVICE), y_vol.to(DEVICE)
                 pred_vol = model(x)
-                val_loss += criterion(pred_vol, y_ret).item()
+                val_loss += criterion(pred_vol, y_vol).item()
                 
         val_loss /= len(val_loader)
         val_losses.append(val_loss)
@@ -113,7 +116,7 @@ def train_model(model, train_loader, val_loader, nu):
 
 # Cell 5: Eval Function
 cells.append(new_code_cell("""\
-def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name):
+def evaluate_and_save(model, loader, df, index_name, model_name, tier_name, split='test'):
     model.eval()
     model.to(DEVICE)
     
@@ -124,7 +127,7 @@ def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name)
     first_horizon_pred = []
     
     with torch.no_grad():
-        for x, y_vol, y_ret, ts in test_loader:
+        for x, y_vol, y_ret, ts in loader:
             x = x.to(DEVICE)
             pred_vol = model(x)
             
@@ -141,14 +144,14 @@ def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name)
                 
                 for j, h in enumerate(HORIZONS):
                     idx = EVAL_INDICES[j]
-                    target_t = t + h - 1
-                    target_time = df['time'].iloc[target_t] if target_t < len(df) else None
-                    target_ret = df['log_return'].iloc[target_t] if target_t < len(df) else None
+                    # Dataset index t is the final observed return at origin.
+                    origin_time = df['time'].iloc[t] if t < len(df) else None
+                    next_return = df['log_return'].iloc[t + 1] if t + 1 < len(df) else None
                     
-                    if target_time is not None:
+                    if origin_time is not None:
                         results.append({
-                            'time': target_time,
-                            'log_return': target_ret,
+                            'time': origin_time,
+                            'log_return': next_return,
                             'horizon': h,
                             'true_volatility': y_vol[i, idx],
                             'predict_volatility': pred_vol[i, idx]
@@ -158,7 +161,8 @@ def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name)
     
     pred_dir = f'/kaggle/working/results_v2/all_predictions/{tier_name}'
     os.makedirs(pred_dir, exist_ok=True)
-    save_path = f'{pred_dir}/{index_name}_{model_name}_predictions.csv'
+    suffix = '' if split == 'test' else f'_{split}'
+    save_path = f'{pred_dir}/{index_name}_{model_name}{suffix}_predictions.csv'
     res_df.to_csv(save_path, index=False)
     
     # Save Plot
@@ -233,6 +237,11 @@ for tier_name, config in TIERS_CONFIG.items():
             dates = pd.date_range('2010-01-01', periods=4059)
             df = pd.DataFrame({'time': dates, 'close': np.random.randn(4059).cumsum() + 1000})
             index_name = 'DAX_40'
+
+        # All benchmark families apply FIXED_SPLITS after the common 2010
+        # evaluation start, rather than from market-specific 2008/2009 rows.
+        df['time'] = pd.to_datetime(df['time'])
+        df = df[df['time'] >= '2010-01-01'].copy()
             
         if 'log_return' not in df.columns:
             df['log_return'] = np.log(df['close'] / df['close'].shift(1)) * 100.0
@@ -247,9 +256,6 @@ for tier_name, config in TIERS_CONFIG.items():
             n_val = int(N * 0.2)
             n_test = N - n_train - n_val
             
-        train_returns = df['log_return'].iloc[:n_train].values
-        nu = calculate_fixed_nu(train_returns)
-        
         df_train = df.iloc[:n_train].copy()
         df_val = df.iloc[max(0, n_train - 60) : n_train + n_val].copy()
         df_test = df.iloc[max(0, n_train + n_val - 60) : ].copy()
@@ -274,7 +280,7 @@ for tier_name, config in TIERS_CONFIG.items():
         for m_name, model in models_dict.items():
             print(f'Training {m_name}...')
             model.to(DEVICE)
-            model, t_losses, v_losses = train_model(model, train_loader, val_loader, nu)
+            model, t_losses, v_losses = train_model(model, train_loader, val_loader)
             
             # Save Model Weight
             weight_dir = f'/kaggle/working/results_v2/models_weights/{tier_name}'
@@ -287,7 +293,8 @@ for tier_name, config in TIERS_CONFIG.items():
             plot_loss_curve(t_losses, v_losses, f'{loss_dir}/{index_name}_{m_name}_loss.png', title=f'{m_name} Loss ({tier_name})')
             
             # Evaluate & Predict
-            res_df = evaluate_and_save(model, test_loader, df_test, index_name, m_name, tier_name)
+            val_df = evaluate_and_save(model, val_loader, df_val, index_name, m_name, tier_name, split='validation')
+            res_df = evaluate_and_save(model, test_loader, df_test, index_name, m_name, tier_name, split='test')
             
             m_metrics = calculate_metrics_for_df(res_df, m_name, index_name)
             index_metrics_dfs.append(m_metrics)
@@ -308,5 +315,5 @@ print('\\nALL TIERS DONE! Check /kaggle/working/results_v2/')
 
 nb.cells = cells
 
-with open('D:/UIT/1003_EPA_PROJECT/1.0.0/1003_EPA-Project_UIT/model/transformer based/version_2/kaggle_notebook_v2.ipynb', 'w') as f:
+with open(Path(__file__).with_name('kaggle_notebook_v2.ipynb'), 'w', encoding='utf-8') as f:
     nbformat.write(nb, f)

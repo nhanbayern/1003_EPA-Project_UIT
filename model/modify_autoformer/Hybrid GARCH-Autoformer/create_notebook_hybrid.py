@@ -1,5 +1,6 @@
 import nbformat
 from nbformat.v4 import new_notebook, new_code_cell
+from pathlib import Path
 
 nb = new_notebook()
 
@@ -22,7 +23,6 @@ import torch
 from torch.utils.data import DataLoader
 from dataset import VolatilityDataset
 from models import HybridGARCHAutoformer
-from utils import calculate_fixed_nu, StudentTNLLLoss
 from config import TIERS_CONFIG
 import glob
 from pathlib import Path
@@ -56,8 +56,10 @@ SPLITS = {
 
 # Cell 4: Train Function
 cells.append(new_code_cell("""\
-def train_model(model, train_loader, val_loader, nu):
-    criterion = StudentTNLLLoss(nu=nu)
+def train_model(model, train_loader, val_loader):
+    # Optimize the declared future-realized volatility target.  Historical
+    # GARCH volatility remains an input feature only.
+    criterion = torch.nn.MSELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     best_val_loss = float('inf')
     patience = 5
@@ -66,11 +68,11 @@ def train_model(model, train_loader, val_loader, nu):
     
     for epoch in range(EPOCHS):
         model.train()
-        for x, y_garch, _, y_ret, _ in train_loader:
-            x, y_garch, y_ret = x.to(DEVICE), y_garch.to(DEVICE), y_ret.to(DEVICE)
+        for x, y_garch, y_vol, _, _ in train_loader:
+            x, y_garch, y_vol = x.to(DEVICE), y_garch.to(DEVICE), y_vol.to(DEVICE)
             optimizer.zero_grad()
             pred_vol = model(x, y_garch)
-            loss = criterion(pred_vol, y_ret)
+            loss = criterion(pred_vol, y_vol)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -78,10 +80,10 @@ def train_model(model, train_loader, val_loader, nu):
         model.eval()
         val_loss = 0
         with torch.no_grad():
-            for x, y_garch, _, y_ret, _ in val_loader:
-                x, y_garch, y_ret = x.to(DEVICE), y_garch.to(DEVICE), y_ret.to(DEVICE)
+            for x, y_garch, y_vol, _, _ in val_loader:
+                x, y_garch, y_vol = x.to(DEVICE), y_garch.to(DEVICE), y_vol.to(DEVICE)
                 pred_vol = model(x, y_garch)
-                val_loss += criterion(pred_vol, y_ret).item()
+                val_loss += criterion(pred_vol, y_vol).item()
                 
         val_loss /= len(val_loader)
         
@@ -102,14 +104,14 @@ def train_model(model, train_loader, val_loader, nu):
 
 # Cell 5: Eval Function
 cells.append(new_code_cell("""\
-def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name):
+def evaluate_and_save(model, loader, df, index_name, model_name, tier_name, split='test'):
     model.eval()
     model.to(DEVICE)
     
     results = []
     
     with torch.no_grad():
-        for x, y_garch, y_vol, y_ret, ts in test_loader:
+        for x, y_garch, y_vol, y_ret, ts in loader:
             x, y_garch = x.to(DEVICE), y_garch.to(DEVICE)
             pred_vol = model(x, y_garch)
             
@@ -122,14 +124,13 @@ def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name)
                 
                 for j, h in enumerate(HORIZONS):
                     idx = EVAL_INDICES[j]
-                    target_t = t + h - 1
-                    target_time = df['time'].iloc[target_t] if target_t < len(df) else None
-                    target_ret = df['log_return'].iloc[target_t] if target_t < len(df) else None
+                    origin_time = df['time'].iloc[t] if t < len(df) else None
+                    next_return = df['log_return'].iloc[t + 1] if t + 1 < len(df) else None
                     
-                    if target_time is not None:
+                    if origin_time is not None:
                         results.append({
-                            'time': target_time,
-                            'log_return': target_ret,
+                            'time': origin_time,
+                            'log_return': next_return,
                             'horizon': h,
                             'true_volatility': y_vol[i, idx],
                             'predict_volatility': pred_vol[i, idx]
@@ -139,7 +140,8 @@ def evaluate_and_save(model, test_loader, df, index_name, model_name, tier_name)
     
     pred_dir = f'/kaggle/working/results_hybrid/all_predictions/{tier_name}'
     os.makedirs(pred_dir, exist_ok=True)
-    save_path = f'{pred_dir}/{index_name}_{model_name}_predictions.csv'
+    suffix = '' if split == 'test' else f'_{split}'
+    save_path = f'{pred_dir}/{index_name}_{model_name}{suffix}_predictions.csv'
     res_df.to_csv(save_path, index=False)
 """))
 
@@ -168,6 +170,8 @@ for tier_name, config in TIERS_CONFIG.items():
             df = pd.DataFrame({'time': dates, 'close': np.random.randn(4059).cumsum() + 1000})
             index_name = 'DAX_40'
             
+        df['time'] = pd.to_datetime(df['time'])
+        df = df[df['time'] >= '2010-01-01'].copy()
         if 'log_return' not in df.columns:
             df['log_return'] = np.log(df['close'] / df['close'].shift(1)) * 100.0
             
@@ -182,8 +186,6 @@ for tier_name, config in TIERS_CONFIG.items():
             n_test = N - n_train - n_val
             
         train_returns = df['log_return'].iloc[:n_train].values
-        nu = calculate_fixed_nu(train_returns)
-        
         print("Fitting GJR-GARCH model on training split...")
         am = arch_model(train_returns, vol='Garch', p=1, o=1, q=1, rescale=False)
         res = am.fit(disp='off')
@@ -220,18 +222,19 @@ for tier_name, config in TIERS_CONFIG.items():
         
         print(f'Training {m_name}...')
         model.to(DEVICE)
-        model = train_model(model, train_loader, val_loader, nu)
+        model = train_model(model, train_loader, val_loader)
         
         weight_dir = f'/kaggle/working/results_hybrid/models_weights/{tier_name}'
         os.makedirs(weight_dir, exist_ok=True)
         torch.save(model.state_dict(), f'{weight_dir}/{index_name}_{m_name}.pt')
         
-        evaluate_and_save(model, test_loader, df_test, index_name, m_name, tier_name)
+        evaluate_and_save(model, val_loader, df_val, index_name, m_name, tier_name, split='validation')
+        evaluate_and_save(model, test_loader, df_test, index_name, m_name, tier_name, split='test')
 
 print('\\nALL TIERS DONE! Check /kaggle/working/results_hybrid/')
 """))
 
 nb.cells = cells
 
-with open('D:/UIT/1003_EPA_PROJECT/1.0.0/1003_EPA-Project_UIT/model/modify_autoformer/Hybrid GARCH-Autoformer/kaggle_notebook_hybrid.ipynb', 'w') as f:
+with open(Path(__file__).with_name('kaggle_notebook_hybrid.ipynb'), 'w', encoding='utf-8') as f:
     nbformat.write(nb, f)
